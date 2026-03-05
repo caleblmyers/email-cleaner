@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Email Cleaner{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <nav class="navbar">
+    <div class="nav-brand">
+      <span class="nav-logo">&#9993;</span>
+      <span class="nav-title">Email Cleaner</span>
+    </div>
+    <div class="nav-actions">
+      {% block nav_extra %}{% endblock %}
+      {% if request.session.get('logged_in') %}
+        <a href="/auth/logout" class="btn btn-ghost">Logout</a>
+      {% endif %}
+    </div>
+  </nav>
+
+  <main class="main-content">
+    {% block content %}{% endblock %}
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/static/app.js"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

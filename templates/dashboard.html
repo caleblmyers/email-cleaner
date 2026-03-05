@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+
+{% block title %}Email Cleaner - Dashboard{% endblock %}
+
+{% block nav_extra %}
+  <button class="btn btn-primary" onclick="fetchAndClassify()" id="fetch-btn">
+    Fetch Emails
+  </button>
+  <button class="btn btn-secondary" onclick="reclassify()" id="classify-btn">
+    Re-classify
+  </button>
+{% endblock %}
+
+{% block content %}
+
+<!-- Stats bar -->
+<div class="stats-bar">
+  <div class="stats-total">
+    <strong>{{ total }}</strong> emails cached
+  </div>
+  <div class="stats-categories">
+    {% for cat in categories %}
+      {% if stats.get(cat) %}
+        <span class="stat-chip stat-{{ cat.lower() }}">
+          {{ cat }}: <strong>{{ stats[cat].count }}</strong>
+          <span class="stat-size">({{ stats[cat].total_mb }} MB)</span>
+        </span>
+      {% endif %}
+    {% endfor %}
+  </div>
+</div>
+
+<!-- Move-to modal -->
+<div id="move-modal" class="modal hidden">
+  <div class="modal-content">
+    <h3>Move to Label</h3>
+    <select id="label-select" class="label-select">
+      <option value="">-- Select a label --</option>
+      {% for label in labels %}
+        <option value="{{ label.id }}">{{ label.name }}</option>
+      {% endfor %}
+    </select>
+    <div class="modal-actions">
+      <button class="btn btn-primary" onclick="confirmMove()">Move</button>
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Email category sections -->
+{% for cat in categories %}
+  {% set emails = grouped.get(cat, []) %}
+  {% if emails %}
+  <div class="category-section" id="section-{{ cat }}">
+    <div class="category-header" onclick="toggleSection('{{ cat }}')">
+      <span class="category-toggle" id="toggle-{{ cat }}">&#9660;</span>
+      <span class="category-name">{{ cat }}</span>
+      <span class="category-count">{{ emails|length }} emails</span>
+      <div class="category-bulk-btns">
+        <button class="btn btn-sm btn-ghost" onclick="selectCategory('{{ cat }}', true); event.stopPropagation()">
+          Select All
+        </button>
+        <button class="btn btn-sm btn-danger" onclick="selectAndDelete('{{ cat }}'); event.stopPropagation()">
+          Delete All
+        </button>
+        <button class="btn btn-sm btn-secondary" onclick="selectAndArchive('{{ cat }}'); event.stopPropagation()">
+          Archive All
+        </button>
+      </div>
+    </div>
+
+    <div class="category-body" id="body-{{ cat }}">
+      <table class="email-table">
+        <thead>
+          <tr>
+            <th class="col-check"></th>
+            <th class="col-sender">From</th>
+            <th class="col-subject">Subject</th>
+            <th class="col-date">Date</th>
+            <th class="col-confidence">AI</th>
+            <th class="col-size">Size</th>
+          </tr>
+        </thead>
+        <tbody id="tbody-{{ cat }}">
+          {% for email in emails %}
+            {% include "partials/email_row.html" %}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+{% endfor %}
+
+{% if total == 0 %}
+<div class="empty-state">
+  <div class="empty-icon">&#9993;</div>
+  <h2>No emails yet</h2>
+  <p>Click <strong>Fetch Emails</strong> to load your inbox.</p>
+</div>
+{% endif %}
+
+<!-- Bulk action bar (sticky bottom, shows on selection) -->
+<div id="bulk-bar" class="bulk-bar hidden">
+  <span id="bulk-count" class="bulk-count">0 selected</span>
+  <div class="bulk-actions">
+    <button class="btn btn-danger" onclick="bulkAction('delete')">Delete</button>
+    <button class="btn btn-secondary" onclick="bulkAction('archive')">Archive</button>
+    <button class="btn btn-secondary" onclick="showMoveModal()">Move to...</button>
+    <button class="btn btn-secondary" onclick="bulkAction('save')">Save to File</button>
+    <button class="btn btn-ghost" onclick="bulkMark(true)">Mark Read</button>
+    <button class="btn btn-ghost" onclick="bulkMark(false)">Mark Unread</button>
+    <button class="btn btn-ghost" onclick="clearSelection()">Clear</button>
+  </div>
+</div>
+
+<!-- Loading overlay -->
+<div id="loading-overlay" class="loading-overlay hidden">
+  <div class="spinner"></div>
+  <p id="loading-msg">Loading...</p>
+</div>
+
+{% endblock %}

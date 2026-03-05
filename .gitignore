@@ -1,0 +1,16 @@
+credentials.json
+token.json
+.env
+*.db
+saved_emails/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+.idea/
+.vscode/
+*.egg-info/
+dist/
+build/
