@@ -1,0 +1,10 @@
+<div class="manage-card editing">
+  <form hx-put="/labels/{{ label.id }}" hx-target="#gmail-labels-list" hx-swap="innerHTML">
+    <div class="manage-card-header">
+      <input type="text" name="name" value="{{ label.name }}" autofocus style="margin:0; flex:1"
+             onkeydown="if(event.key==='Enter'){event.preventDefault(); htmx.trigger(this.closest('form'),'submit')}">
+      <button type="submit" class="sm">Save</button>
+      <button type="button" class="secondary sm" hx-get="/labels/html" hx-target="#gmail-labels-list" hx-swap="innerHTML">Cancel</button>
+    </div>
+  </form>
+</div>

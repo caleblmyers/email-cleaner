@@ -2,224 +2,261 @@
 
 {% block title %}Email Cleaner - Dashboard{% endblock %}
 
-{% block nav_extra %}
-  <div class="fetch-group">
-    <button class="btn btn-primary" onclick="fetchEmails()" id="fetch-btn">
-      Fetch Emails
-    </button>
-    <select id="fetch-count" class="fetch-count-select" title="Number of emails to fetch">
-      <option value="50">50</option>
-      <option value="100">100</option>
-      <option value="200">200</option>
-      <option value="500">500</option>
-      <option value="all">All</option>
-    </select>
+{% block toolbar %}
+<div class="toolbar">
+  <div class="container-fluid toolbar-inner">
+    <div class="toolbar-section">
+      <div role="group" class="toolbar-group">
+        <button onclick="fetchEmails()" id="fetch-btn" class="sm">Fetch</button>
+        <select id="fetch-count" class="sm" title="Number of emails to fetch">
+          <option value="50">50</option>
+          <option value="100">100</option>
+          <option value="200">200</option>
+          <option value="500">500</option>
+          <option value="all">All</option>
+        </select>
+      </div>
+      <div role="group" class="toolbar-group">
+        <button class="secondary sm" onclick="classifyEmails()" id="classify-btn">Classify</button>
+        <select id="classify-count" class="sm" title="Number of emails to classify">
+          <option value="20">20</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+          <option value="0">All</option>
+        </select>
+      </div>
+    </div>
+    <div class="toolbar-section">
+      <div class="toolbar-group">
+        <small class="toolbar-label">Group by</small>
+        <select class="sm" onchange="changeGroupBy(this.value)">
+          {% for value, label in group_modes.items() %}
+            <option value="{{ value }}" {% if value == group_by %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="toolbar-group">
+        <small class="toolbar-label">then</small>
+        <select class="sm" onchange="changeThenBy(this.value)">
+          <option value="">None</option>
+          {% for value, label in group_modes.items() %}
+            {% if value != group_by %}
+              <option value="{{ value }}" {% if value == then_by %}selected{% endif %}>{{ label }}</option>
+            {% endif %}
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <div class="toolbar-section">
+      <a href="#" class="sm contrast outline" role="button" onclick="openCategoriesModal(); return false">Categories</a>
+      <a href="#" class="sm secondary outline" role="button" onclick="openGmailLabelsModal(); return false">Labels</a>
+    </div>
   </div>
-  <div class="classify-group">
-    <button class="btn btn-secondary" onclick="classifyEmails()" id="classify-btn">
-      Classify
-    </button>
-    <select id="classify-count" class="classify-count-select" title="Number of emails to classify">
-      <option value="20">20</option>
-      <option value="50">50</option>
-      <option value="100">100</option>
-      <option value="0">All</option>
-    </select>
-  </div>
-  <div class="group-by-group">
-    <label for="group-by-select" class="group-by-label">Group by:</label>
-    <select id="group-by-select" class="group-by-select" onchange="changeGroupBy(this.value)">
-      {% for value, label in group_modes.items() %}
-        <option value="{{ value }}" {% if value == group_by %}selected{% endif %}>{{ label }}</option>
-      {% endfor %}
-    </select>
-  </div>
-  <button class="btn btn-ghost" onclick="openCategoriesModal()">Manage Categories</button>
-  <button class="btn btn-ghost" onclick="openGmailLabelsModal()">Manage Labels</button>
+</div>
 {% endblock %}
 
 {% block content %}
 
-<!-- Stats bar -->
-<div class="stats-bar">
-  <div class="stats-total">
-    <strong>{{ total }}</strong> emails cached
-    {% if unclassified_count > 0 %}
-      <span class="stat-unclassified">({{ unclassified_count }} unclassified)</span>
-    {% endif %}
+<!-- Overview cards -->
+<div class="overview">
+  <div class="overview-card">
+    <div class="overview-number">{{ total }}</div>
+    <div class="overview-label">emails cached</div>
   </div>
-  <div class="stats-categories">
-    {% set cat_color_map = {} %}
-    {% for cat in user_categories %}
-      {% set _ = cat_color_map.update({cat.name: cat.color}) %}
-    {% endfor %}
-    {% for group in group_summaries %}
-      {% if stats.get(group.name) %}
-        {% set chip_color = cat_color_map.get(group.name, '') if group_by == 'category' else '' %}
-        <span class="stat-chip {% if not chip_color %}stat-generic{% endif %}" {% if chip_color %}style="background:{{ chip_color }}"{% endif %}>
-          {{ group.name }}: <strong>{{ stats[group.name].count }}</strong>
-          <span class="stat-size">({{ stats[group.name].total_mb }} MB)</span>
-        </span>
-      {% endif %}
-    {% endfor %}
+  {% if unclassified_count > 0 %}
+  <div class="overview-card overview-warn">
+    <div class="overview-number">{{ unclassified_count }}</div>
+    <div class="overview-label">unclassified</div>
   </div>
+  {% endif %}
+  {% if ai_usage and ai_usage.total_runs > 0 %}
+  <div class="overview-card">
+    <div class="overview-number">{{ ai_usage.total_emails_classified }}</div>
+    <div class="overview-label">classified</div>
+  </div>
+  <div class="overview-card">
+    <div class="overview-number">${{ "%.4f" | format(ai_usage.total_cost) }}</div>
+    <div class="overview-label">AI cost</div>
+  </div>
+  {% endif %}
 </div>
 
-<!-- AI usage bar -->
-{% if ai_usage and ai_usage.total_runs > 0 %}
-<div class="ai-usage-bar">
-  <span class="ai-usage-label">AI Usage:</span>
-  <span class="ai-usage-stat">{{ ai_usage.total_emails_classified }} emails classified</span>
-  <span class="ai-usage-stat">{{ "{:,}".format(ai_usage.total_input_tokens + ai_usage.total_output_tokens) }} tokens</span>
-  <span class="ai-usage-stat ai-usage-cost">${{ "%.4f" | format(ai_usage.total_cost) }}</span>
+<!-- Category breakdown chips -->
+{% if group_summaries %}
+<div class="chip-bar">
+  {% set cat_color_map = {} %}
+  {% for cat in user_categories %}
+    {% set _ = cat_color_map.update({cat.name: cat.color}) %}
+  {% endfor %}
+  {% for group in group_summaries %}
+    {% if stats.get(group.name) %}
+      {% set chip_color = cat_color_map.get(group.name, '') if group_by == 'category' else '' %}
+      <span class="chip" {% if chip_color %}style="background:{{ chip_color }}"{% endif %}>
+        {{ group.name }} <strong>{{ stats[group.name].count }}</strong>
+        <small>{{ stats[group.name].total_mb }} MB</small>
+      </span>
+    {% endif %}
+  {% endfor %}
 </div>
 {% endif %}
-
-<!-- Move-to modal -->
-<div id="move-modal" class="modal hidden">
-  <div class="modal-content">
-    <h3>Move to Label</h3>
-    <select id="label-select" class="label-select">
-      <option value="">-- Select a label --</option>
-      {% for label in labels %}
-        <option value="{{ label.id }}">{{ label.name }}</option>
-      {% endfor %}
-    </select>
-    <div class="modal-actions">
-      <button class="btn btn-primary" onclick="confirmMove()">Move</button>
-      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
-    </div>
-  </div>
-</div>
-
-<!-- Confirmation modal -->
-<div id="confirm-modal" class="modal hidden">
-  <div class="modal-content">
-    <h3>Confirm Action</h3>
-    <p id="confirm-msg"></p>
-    <div id="confirm-input-group" class="hidden">
-      <input type="text" id="confirm-input" class="confirm-input" autocomplete="off">
-    </div>
-    <div class="modal-actions">
-      <button class="btn btn-danger" id="confirm-btn">Confirm</button>
-      <button class="btn btn-ghost" id="confirm-cancel-btn">Cancel</button>
-    </div>
-  </div>
-</div>
 
 <!-- Current group_by mode for JS -->
 <script>const CURRENT_GROUP_BY = '{{ group_by }}';</script>
 
-<!-- Email group sections (collapsed, lazy-loaded) -->
+<!-- Email group sections -->
 {% for group in group_summaries %}
   {% set sid = loop.index %}
-  <div class="category-section" id="section-{{ sid }}" data-group-name="{{ group.name }}" data-loaded="false" data-count="{{ group.count }}">
-    <div class="category-header">
-      <input type="checkbox" class="group-select" data-sid="{{ sid }}" onclick="onGroupCheckChange(this); event.stopPropagation();" title="Select entire group">
-      <span class="category-toggle" id="toggle-{{ sid }}" onclick="toggleSection('{{ sid }}')">&#9654;</span>
-      <span class="category-name" onclick="toggleSection('{{ sid }}')">{{ group.name }}</span>
-      <span class="category-count" id="count-{{ sid }}" onclick="toggleSection('{{ sid }}')">{{ group.count }} emails</span>
+  <details class="group-section" id="section-{{ sid }}" data-group-name="{{ group.name }}" data-count="{{ group.count }}">
+    <summary>
+      <div class="group-header">
+        <input type="checkbox" class="group-select" data-sid="{{ sid }}" data-group-name="{{ group.name }}" onclick="onGroupCheckChange(this); event.stopPropagation();" title="Select entire group">
+        <span class="group-name">{{ group.name }}</span>
+        <span class="group-count">{{ group.count }} emails</span>
+        {% if stats.get(group.name) %}
+          <span class="group-size">{{ stats[group.name].total_mb }} MB</span>
+        {% endif %}
+      </div>
+    </summary>
+    <div class="group-body" id="body-{{ sid }}"
+         hx-get="/emails/group/html?group_by={{ group_by }}&group_name={{ group.name | urlencode }}&sid={{ sid }}{% if then_by %}&then_by={{ then_by }}{% endif %}"
+         hx-trigger="intersect once"
+         hx-swap="innerHTML">
+      <p aria-busy="true" class="loading-placeholder">Loading emails...</p>
     </div>
-
-    <div class="category-body collapsed" id="body-{{ sid }}">
-      <table class="email-table">
-        <thead>
-          <tr>
-            <th class="col-check"></th>
-            <th class="col-sender">From</th>
-            <th class="col-subject">Subject</th>
-            <th class="col-date">Date</th>
-            <th class="col-confidence">AI</th>
-            <th class="col-size">Size</th>
-          </tr>
-        </thead>
-        <tbody id="tbody-{{ sid }}">
-        </tbody>
-      </table>
-    </div>
-  </div>
+  </details>
 {% endfor %}
 
 {% if total == 0 %}
-<div class="empty-state">
+<article class="empty-state">
   <div class="empty-icon">&#9993;</div>
-  <h2>No emails yet</h2>
-  <p>Click <strong>Fetch Emails</strong> to load your inbox.</p>
-</div>
+  <hgroup>
+    <h3>No emails yet</h3>
+    <p>Click <strong>Fetch</strong> above to load your inbox.</p>
+  </hgroup>
+</article>
 {% elif group_summaries | length == 0 %}
-<div class="empty-state">
+<article class="empty-state">
   <div class="empty-icon">&#128270;</div>
-  <h2>Emails fetched but not categorized</h2>
-  <p>Click <strong>Classify</strong> to run AI categorization on your fetched emails.</p>
-</div>
+  <hgroup>
+    <h3>Emails fetched but not categorized</h3>
+    <p>Click <strong>Classify</strong> to run AI categorization.</p>
+  </hgroup>
+</article>
 {% endif %}
 
-<!-- Bulk action bar (sticky bottom, shows on selection) -->
+<!-- Bulk action bar -->
 <div id="bulk-bar" class="bulk-bar hidden">
-  <span id="bulk-count" class="bulk-count">0 selected</span>
-  <div class="bulk-actions">
-    <button class="btn btn-danger" onclick="bulkAction('delete')">Delete</button>
-    <button class="btn btn-secondary" onclick="bulkAction('archive')">Archive</button>
-    <button class="btn btn-secondary" onclick="showMoveModal()">Move to...</button>
-    <button class="btn btn-secondary" onclick="bulkAction('save')">Save to File</button>
-    <button class="btn btn-ghost" onclick="bulkMark(true)">Mark Read</button>
-    <button class="btn btn-ghost" onclick="bulkMark(false)">Mark Unread</button>
-    <button class="btn btn-ghost" onclick="clearSelection()">Clear</button>
+  <strong id="bulk-count">0 selected</strong>
+  <div class="bulk-actions" role="group">
+    <button class="contrast sm" onclick="bulkAction('delete')">Delete</button>
+    <button class="sm" onclick="bulkAction('archive')">Archive</button>
+    <button class="secondary sm" onclick="showMoveModal()">Move to...</button>
+    <button class="secondary sm" onclick="bulkAction('save')">Save</button>
+    <button class="outline sm" onclick="bulkMark(true)">Read</button>
+    <button class="outline sm" onclick="bulkMark(false)">Unread</button>
+    <button class="outline secondary sm" onclick="clearSelection()">Clear</button>
   </div>
 </div>
 
-<!-- Categories management modal -->
-<div id="categories-modal" class="modal hidden">
-  <div class="modal-content categories-modal-content">
-    <div class="categories-modal-header">
+<!-- Move-to dialog -->
+<dialog id="move-modal">
+  <article>
+    <header>
+      <button aria-label="Close" rel="prev" onclick="closeModal()"></button>
+      <h3>Move to Label</h3>
+    </header>
+    <select id="label-select"
+            hx-get="/labels/options"
+            hx-trigger="load-move-labels"
+            hx-swap="innerHTML">
+      <option value="">-- Select a label --</option>
+    </select>
+    <footer>
+      <button class="secondary" onclick="closeModal()">Cancel</button>
+      <button onclick="confirmMove()">Move</button>
+    </footer>
+  </article>
+</dialog>
+
+<!-- Confirmation dialog -->
+<dialog id="confirm-modal">
+  <article>
+    <header>
+      <button aria-label="Close" rel="prev" onclick="this.closest('dialog').close()"></button>
+      <h3>Confirm Action</h3>
+    </header>
+    <p id="confirm-msg"></p>
+    <div id="confirm-input-group" class="hidden">
+      <input type="text" id="confirm-input" autocomplete="off">
+    </div>
+    <footer>
+      <button class="secondary" id="confirm-cancel-btn">Cancel</button>
+      <button class="contrast" id="confirm-btn">Confirm</button>
+    </footer>
+  </article>
+</dialog>
+
+<!-- Categories dialog -->
+<dialog id="categories-modal">
+  <article class="dialog-wide">
+    <header>
+      <button aria-label="Close" rel="prev" onclick="document.getElementById('categories-modal').close()"></button>
       <h3>Manage Categories</h3>
-      <button class="btn btn-ghost btn-sm" onclick="closeCategoriesModal()">&times;</button>
-    </div>
-    <p class="categories-modal-desc">Add, edit, or remove AI classification categories. Each category has a set of descriptor items that guide the classifier.</p>
+    </header>
+    <p><small class="secondary">Add, edit, or remove AI classification categories. Each category has descriptor items that guide the classifier.</small></p>
 
-    <div id="categories-list" class="categories-list">
-      <!-- Populated by JS -->
+    <div id="categories-list"
+         hx-get="/categories/html"
+         hx-trigger="load-categories"
+         hx-swap="innerHTML">
     </div>
 
-    <div class="categories-add-form">
-      <h4>Add New Category</h4>
-      <div class="category-form-row">
-        <input type="text" id="new-cat-name" class="cat-input" placeholder="Category name (e.g. Finance)">
-        <input type="color" id="new-cat-color" class="cat-color-input" value="#718096">
-        <button class="btn btn-primary btn-sm" onclick="addCategory()">Add</button>
+    <hr>
+    <strong>Add New Category</strong>
+    <form hx-post="/categories/" hx-target="#categories-list" hx-swap="innerHTML"
+          hx-on::after-request="if(event.detail.successful)this.reset()">
+      <div class="grid" style="grid-template-columns: 1fr auto auto; align-items:center">
+        <input type="text" name="name" placeholder="Category name" required>
+        <input type="color" name="color" value="#718096" class="color-pick">
+        <button type="submit">Add</button>
       </div>
-      <input type="text" id="new-cat-desc" class="cat-input cat-desc-input" placeholder="Descriptor items (e.g. invoices, bank statements, tax documents)">
-    </div>
-  </div>
-</div>
+      <input type="text" name="description" placeholder="Descriptor items (e.g. invoices, bank statements, tax)">
+    </form>
+  </article>
+</dialog>
 
-<!-- Gmail labels management modal -->
-<div id="gmail-labels-modal" class="modal hidden">
-  <div class="modal-content categories-modal-content">
-    <div class="categories-modal-header">
+<!-- Gmail labels dialog -->
+<dialog id="gmail-labels-modal">
+  <article class="dialog-wide">
+    <header>
+      <button aria-label="Close" rel="prev" onclick="document.getElementById('gmail-labels-modal').close()"></button>
       <h3>Manage Gmail Labels</h3>
-      <button class="btn btn-ghost btn-sm" onclick="closeGmailLabelsModal()">&times;</button>
-    </div>
-    <p class="categories-modal-desc">Create, rename, or delete labels in your Gmail account. Deleting a label does not delete the emails in it.</p>
+    </header>
+    <p><small class="secondary">Create, rename, or delete labels in your Gmail account. Deleting a label does not delete the emails in it.</small></p>
 
-    <div id="gmail-labels-list" class="categories-list">
-      <!-- Populated by JS -->
+    <div id="gmail-labels-list"
+         hx-get="/labels/html"
+         hx-trigger="load-labels"
+         hx-swap="innerHTML">
     </div>
 
-    <div class="categories-add-form">
-      <h4>Create New Label</h4>
-      <div class="category-form-row">
-        <input type="text" id="new-gmail-label-name" class="cat-input" placeholder="Label name (e.g. Work/Projects)">
-        <button class="btn btn-primary btn-sm" onclick="createGmailLabel()">Create</button>
+    <hr>
+    <strong>Create New Label</strong>
+    <form hx-post="/labels/" hx-target="#gmail-labels-list" hx-swap="innerHTML"
+          hx-on::after-request="if(event.detail.successful)this.reset()">
+      <div role="group">
+        <input type="text" name="name" placeholder="Label name (e.g. Work/Projects)" required>
+        <button type="submit">Create</button>
       </div>
-    </div>
-  </div>
-</div>
+    </form>
+  </article>
+</dialog>
 
 <!-- Loading overlay -->
-<div id="loading-overlay" class="loading-overlay hidden">
-  <div class="spinner"></div>
-  <p id="loading-msg">Loading...</p>
-</div>
+<dialog id="loading-overlay" class="loading-dialog">
+  <article>
+    <p aria-busy="true" id="loading-msg">Loading...</p>
+  </article>
+</dialog>
 
 {% endblock %}

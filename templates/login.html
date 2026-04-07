@@ -3,37 +3,33 @@
 {% block title %}Email Cleaner - Login{% endblock %}
 
 {% block content %}
-<div class="login-container">
-  <div class="login-card">
-    <div class="login-icon">&#9993;</div>
-    <h1 class="login-title">Email Cleaner</h1>
-    <p class="login-description">
-      Connect your Gmail account to sort, categorize, and clean up your inbox using AI.
-    </p>
+<section class="login-page">
+  <article>
+    <div class="login-hero">&#9993;</div>
+    <hgroup>
+      <h2>Email Cleaner</h2>
+      <p>Connect your Gmail to sort, categorize, and clean your inbox with AI.</p>
+    </hgroup>
 
     {% if error %}
-    <div class="alert alert-error">
-      Authentication error: {{ error }}. Please try again.
-    </div>
+    <p class="error-text">Authentication error: {{ error }}. Please try again.</p>
     {% endif %}
 
-    <a href="/auth/login" class="btn btn-primary btn-large">
-      Connect Gmail Account
-    </a>
+    <a href="/auth/login" role="button" class="login-btn">Connect Gmail Account</a>
 
-    <div class="login-permissions">
-      <p><strong>Permissions requested:</strong></p>
+    <details>
+      <summary role="button" class="outline secondary">What permissions are needed?</summary>
       <ul>
         <li>Read and list your emails</li>
         <li>Move and archive emails</li>
         <li>Delete emails (to trash)</li>
         <li>Manage labels and folders</li>
       </ul>
-      <p class="permissions-note">
+      <small class="secondary">
         Your emails are processed locally. Only subject lines, sender names, and snippets
-        are sent to Claude AI for categorization — never full email content.
-      </p>
-    </div>
-  </div>
-</div>
+        are sent to Claude AI for categorization.
+      </small>
+    </details>
+  </article>
+</section>
 {% endblock %}

@@ -1,0 +1,15 @@
+{% for label in labels %}
+<div class="manage-card">
+  <div class="manage-card-header">
+    <strong>{{ label.name }}</strong>
+    <span class="manage-card-actions">
+      <a href="#" class="secondary" hx-get="/labels/{{ label.id }}/edit" hx-target="closest .manage-card" hx-swap="outerHTML" onclick="return false">Rename</a>
+      <a href="#" class="del" hx-delete="/labels/{{ label.id }}" hx-target="#gmail-labels-list" hx-swap="innerHTML" hx-confirm="Delete &quot;{{ label.name }}&quot;? Emails will NOT be deleted." onclick="return false">Delete</a>
+    </span>
+  </div>
+</div>
+{% endfor %}
+
+{% if not labels %}
+  <p class="empty-cell">No user-created labels in Gmail.</p>
+{% endif %}

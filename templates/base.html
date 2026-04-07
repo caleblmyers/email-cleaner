@@ -1,26 +1,30 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}Email Cleaner{% endblock %}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
   <link rel="stylesheet" href="/static/style.css">
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
 </head>
 <body>
-  <nav class="navbar">
-    <div class="nav-brand">
-      <span class="nav-logo">&#9993;</span>
-      <span class="nav-title">Email Cleaner</span>
-    </div>
-    <div class="nav-actions">
-      {% block nav_extra %}{% endblock %}
-      {% if request.session.get('logged_in') %}
-        <a href="/auth/logout" class="btn btn-ghost">Logout</a>
-      {% endif %}
-    </div>
-  </nav>
+  <header class="app-header">
+    <nav class="container-fluid">
+      <ul>
+        <li><strong class="app-brand">&#9993; Email Cleaner</strong></li>
+      </ul>
+      <ul>
+        {% block nav_extra %}{% endblock %}
+        {% if request.session.get('logged_in') %}
+          <li><a href="/auth/logout" class="contrast">Logout</a></li>
+        {% endif %}
+      </ul>
+    </nav>
+    {% block toolbar %}{% endblock %}
+  </header>
 
-  <main class="main-content">
+  <main class="container">
     {% block content %}{% endblock %}
   </main>
 

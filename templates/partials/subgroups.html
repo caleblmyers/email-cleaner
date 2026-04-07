@@ -1,0 +1,22 @@
+{% for sub in sub_summaries %}
+  {% set sub_sid = parent_sid ~ '-' ~ loop.index %}
+  <details class="subgroup" id="section-{{ sub_sid }}">
+    <summary>
+      <div class="subgroup-header">
+        <input type="checkbox" class="group-select" data-sid="{{ sub_sid }}" data-group-name="{{ sub.name }}" onclick="onGroupCheckChange(this); event.stopPropagation();">
+        <span class="subgroup-name">{{ sub.name }}</span>
+        <span class="group-count">{{ sub.count }}</span>
+      </div>
+    </summary>
+    <div class="subgroup-body" id="body-{{ sub_sid }}"
+         hx-get="/emails/subgroup/html?group_by={{ group_by }}&group_name={{ group_name | urlencode }}&then_by={{ then_by }}&subgroup_name={{ sub.name | urlencode }}&sid={{ sub_sid }}"
+         hx-trigger="intersect once"
+         hx-swap="innerHTML">
+      <p aria-busy="true" class="loading-placeholder">Loading...</p>
+    </div>
+  </details>
+{% endfor %}
+
+{% if not sub_summaries %}
+  <p class="empty-cell">No emails in this group.</p>
+{% endif %}
