@@ -1,0 +1,19 @@
+services:
+  email-cleaner:
+    build: .
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./credentials.json:/app/credentials.json:ro
+      - email_data:/app/data
+      - saved_emails:/app/saved_emails
+    environment:
+      - DB_PATH=/app/data/email_cleaner.db
+      - SAVE_DIR=/app/saved_emails
+    restart: unless-stopped
+
+volumes:
+  email_data:
+  saved_emails:

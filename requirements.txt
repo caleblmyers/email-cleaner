@@ -10,3 +10,8 @@ anthropic==0.40.0
 python-dotenv==1.0.1
 itsdangerous==2.2.0
 starlette==0.41.3
+slowapi==0.1.9
+pytest==8.3.4
+pytest-asyncio==0.24.0
+httpx==0.28.1
+ruff==0.8.6

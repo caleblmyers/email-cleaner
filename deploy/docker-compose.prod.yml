@@ -1,0 +1,38 @@
+services:
+  email-cleaner:
+    build: ..
+    expose:
+      - "8000"
+    env_file:
+      - ../.env
+    volumes:
+      - ../credentials.json:/app/credentials.json:ro
+      - email_data:/app/data
+      - saved_emails:/app/saved_emails
+    environment:
+      - DB_PATH=/app/data/email_cleaner.db
+      - SAVE_DIR=/app/saved_emails
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      - caddy_logs:/var/log/caddy
+    environment:
+      - DOMAIN=${DOMAIN:-localhost}
+    depends_on:
+      - email-cleaner
+    restart: unless-stopped
+
+volumes:
+  email_data:
+  saved_emails:
+  caddy_data:
+  caddy_config:
+  caddy_logs:

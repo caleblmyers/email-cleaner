@@ -2,6 +2,17 @@
 
 A Python web app that connects to Gmail, categorizes your inbox with Claude AI, and lets you bulk delete, archive, move, save, and mark emails.
 
+## Architecture
+
+```mermaid
+graph LR
+    Browser -->|OAuth2 / REST| FastAPI
+    FastAPI -->|fetch/actions| GmailAPI[Gmail API]
+    FastAPI -->|classify| Claude[Anthropic Claude]
+    FastAPI -->|read/write| SQLite[(SQLite)]
+    FastAPI -->|templates| Jinja2
+```
+
 ## Prerequisites
 
 - Python 3.10+
@@ -65,6 +76,13 @@ Open [http://localhost:8000](http://localhost:8000) in your browser.
    - **Mark Read / Unread**
 5. Click **Fetch Emails** again to load more, or **Re-classify** to re-run AI on all cached emails.
 
+### Keyboard shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+A` | Select all visible emails |
+| `Escape` | Close modal or clear selection |
+
 ## Configuration
 
 All settings are in `.env` (defaults shown):
@@ -77,20 +95,89 @@ All settings are in `.env` (defaults shown):
 | `EMAILS_PER_PAGE` | `50` | Emails fetched per "Fetch" call. |
 | `CLASSIFIER_BATCH_SIZE` | `20` | Emails sent to Claude per API call. |
 | `SAVE_DIR` | `./saved_emails` | Directory for saved email files. |
+| `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR). |
+| `SESSION_MAX_AGE` | `3600` | Session timeout in seconds. |
 
-## File structure
+## API Documentation
+
+FastAPI auto-generates interactive API docs. When the app is running, visit:
+
+- **Swagger UI**: [http://localhost:8000/docs](http://localhost:8000/docs)
+- **ReDoc**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
+
+## Development
+
+### Running tests
+
+```bash
+pip install -r requirements.txt
+python -m pytest tests/ -v
+```
+
+### Linting and formatting
+
+```bash
+ruff check .
+ruff format .
+```
+
+### File structure
 
 ```
 email-cleaner/
-├── main.py            # App entry point
-├── config.py          # Settings
-├── database.py        # SQLite cache
-├── gmail_client.py    # Gmail API + OAuth2
-├── ai_classifier.py   # Claude classification
-├── routers/           # FastAPI route handlers
-├── templates/         # Jinja2 HTML templates
-├── static/            # CSS + JS
-├── credentials.json   # Your GCP credentials (gitignored)
-├── .env               # Your secrets (gitignored)
+├── main.py              # App entry point
+├── config.py            # Settings and logging setup
+├── database.py          # SQLite cache
+├── gmail_client.py      # Gmail API + OAuth2
+├── ai_classifier.py     # Claude classification
+├── routers/             # FastAPI route handlers
+│   ├── auth.py          # OAuth login/logout
+│   ├── dashboard.py     # Dashboard page
+│   └── emails.py        # Fetch, classify, bulk actions
+├── templates/           # Jinja2 HTML templates
+├── static/              # CSS + JS
+├── tests/               # Pytest test suite
+├── deploy/              # Production deployment configs
+├── credentials.json     # Your GCP credentials (gitignored)
+├── .env                 # Your secrets (gitignored)
+├── Dockerfile
+├── docker-compose.yml
 └── requirements.txt
 ```
+
+## Deployment
+
+### Docker (development)
+
+```bash
+docker compose up --build
+```
+
+### Production
+
+Use the production compose file with Caddy for automatic TLS:
+
+```bash
+cd deploy
+DOMAIN=mail.yourdomain.com docker compose -f docker-compose.prod.yml up -d
+```
+
+Before deploying:
+
+1. Update your GCP OAuth redirect URI to `https://mail.yourdomain.com/auth/callback`
+2. Point your domain's DNS to the server
+3. Place `credentials.json` and `.env` on the server
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed architecture documentation.
+
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| "Not authenticated" error | Delete `token.json` and re-login |
+| OAuth redirect mismatch | Ensure `REDIRECT_URI` in GCP matches your `APP_PORT` |
+| `credentials.json` not found | Download OAuth client JSON from GCP Console |
+| Rate limit errors (429) | The app auto-retries; reduce `EMAILS_PER_PAGE` if persistent |
+| Classification returns all "Uncategorized" | Check `ANTHROPIC_API_KEY` is valid and has credits |
+| Token refresh fails | Delete `token.json`, re-authenticate |
+| Database locked errors | Ensure only one instance of the app is running |
