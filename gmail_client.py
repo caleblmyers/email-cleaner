@@ -1,6 +1,6 @@
+"""Gmail API client: OAuth2 authentication, message fetching, and actions."""
+
 import base64
-import email as email_lib
-import json
 import os
 import re
 import time
@@ -14,6 +14,8 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 import config
+
+log = config.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -99,20 +101,92 @@ def get_message_metadata(service, msg_id: str) -> dict:
     return _parse_message(msg)
 
 
-def batch_get_messages(service, msg_ids: list[str]) -> list[dict]:
-    """Fetch metadata for multiple messages. Falls back to sequential on error."""
+def batch_get_messages(service, msg_ids: list[str]) -> tuple[list[dict], list[dict]]:
+    """Fetch metadata for multiple messages using the Gmail Batch API.
+
+    Falls back to sequential fetching if the batch API fails.
+    Returns (results, skipped).
+    """
     results = []
-    # Use sequential fetches with a small delay to avoid rate limits
-    for msg_id in msg_ids:
+    skipped = []
+
+    BATCH_LIMIT = 20
+
+    def _callback(request_id, response, exception):
+        if exception is not None:
+            log.error("Batch fetch failed for %s: %s", request_id, exception)
+            skipped.append({"id": request_id, "error": str(exception)})
+        else:
+            try:
+                results.append(_parse_message(response))
+            except Exception as e:
+                log.error("Failed to parse message %s: %s", request_id, e)
+                skipped.append({"id": request_id, "error": str(e)})
+
+    try:
+        for i in range(0, len(msg_ids), BATCH_LIMIT):
+            if i > 0:
+                time.sleep(1)
+            chunk = msg_ids[i : i + BATCH_LIMIT]
+            batch = service.new_batch_http_request()
+            for msg_id in chunk:
+                batch.add(
+                    service.users().messages().get(
+                        userId="me",
+                        id=msg_id,
+                        format="metadata",
+                        metadataHeaders=["From", "Subject", "Date"],
+                    ),
+                    request_id=msg_id,
+                    callback=_callback,
+                )
+            batch.execute()
+
+        # Retry any that were rate-limited, sequentially
+        rate_limited = [s for s in skipped if "429" in str(s.get("error", "")) or "rate" in str(s.get("error", "")).lower()]
+        if rate_limited:
+            retry_ids = [s["id"] for s in rate_limited]
+            for s in rate_limited:
+                skipped.remove(s)
+            log.info("Retrying %d rate-limited messages sequentially", len(retry_ids))
+            time.sleep(3)
+            retry_results, retry_skipped = _sequential_get_messages(service, retry_ids)
+            results.extend(retry_results)
+            skipped.extend(retry_skipped)
+
+        log.info("Batch API fetched %d messages (%d skipped)", len(results), len(skipped))
+    except Exception as e:
+        log.warning("Batch API failed, falling back to sequential: %s", e)
+        results, skipped = _sequential_get_messages(service, msg_ids)
+
+    return results, skipped
+
+
+def _sequential_get_messages(service, msg_ids: list[str]) -> tuple[list[dict], list[dict]]:
+    """Fallback sequential fetch when batch API is unavailable."""
+    results = []
+    skipped = []
+    for i, msg_id in enumerate(msg_ids):
+        if i > 0 and i % 10 == 0:
+            time.sleep(1)
         try:
             results.append(get_message_metadata(service, msg_id))
         except HttpError as e:
             if e.resp.status == 429:
-                time.sleep(1)
-                results.append(get_message_metadata(service, msg_id))
+                log.warning("Rate limited on message %s, retrying after 3s", msg_id)
+                time.sleep(3)
+                try:
+                    results.append(get_message_metadata(service, msg_id))
+                except Exception as retry_err:
+                    log.error("Retry failed for message %s: %s", msg_id, retry_err)
+                    skipped.append({"id": msg_id, "error": str(retry_err)})
             else:
-                pass  # Skip messages that can't be fetched
-    return results
+                log.error("Failed to fetch message %s: HTTP %d – %s", msg_id, e.resp.status, e)
+                skipped.append({"id": msg_id, "error": f"HTTP {e.resp.status}"})
+        except Exception as e:
+            log.error("Unexpected error fetching message %s: %s", msg_id, e)
+            skipped.append({"id": msg_id, "error": str(e)})
+    return results, skipped
 
 
 def get_message_full(service, msg_id: str) -> dict:
@@ -175,14 +249,122 @@ def get_labels(service) -> list[dict]:
     return result.get("labels", [])
 
 
-def bulk_action(service, msg_ids: list[str], action_fn) -> dict:
-    """Run action_fn(service, id) for each id. Returns success/failed counts."""
+def create_label(service, name: str) -> dict:
+    """Create a new user label in Gmail. Returns the created label resource."""
+    body = {
+        "name": name,
+        "labelListVisibility": "labelShow",
+        "messageListVisibility": "show",
+    }
+    return service.users().labels().create(userId="me", body=body).execute()
+
+
+def update_label(service, label_id: str, name: str) -> dict:
+    """Rename a Gmail label. Returns the updated label resource."""
+    body = {"name": name}
+    return service.users().labels().update(userId="me", id=label_id, body=body).execute()
+
+
+def delete_label(service, label_id: str) -> None:
+    """Permanently delete a Gmail label. Messages are not deleted."""
+    service.users().labels().delete(userId="me", id=label_id).execute()
+
+
+def bulk_trash(service, msg_ids: list[str]) -> dict:
+    """Trash emails in bulk using Gmail's batchModify (up to 1000 per call)."""
+    BATCH_LIMIT = 1000
     succeeded = []
     failed = []
-    for msg_id in msg_ids:
+    for i in range(0, len(msg_ids), BATCH_LIMIT):
+        if i > 0:
+            time.sleep(2)
+        chunk = msg_ids[i : i + BATCH_LIMIT]
+        try:
+            service.users().messages().batchModify(
+                userId="me",
+                body={"ids": chunk, "addLabelIds": ["TRASH"], "removeLabelIds": ["INBOX"]},
+            ).execute()
+            succeeded.extend(chunk)
+        except HttpError as e:
+            if e.resp.status == 429:
+                log.warning("Rate limited on bulk trash, retrying chunk after 5s")
+                time.sleep(5)
+                try:
+                    service.users().messages().batchModify(
+                        userId="me",
+                        body={"ids": chunk, "addLabelIds": ["TRASH"], "removeLabelIds": ["INBOX"]},
+                    ).execute()
+                    succeeded.extend(chunk)
+                except Exception as retry_err:
+                    log.error("Bulk trash retry failed: %s", retry_err)
+                    failed.extend({"id": mid, "error": str(retry_err)} for mid in chunk)
+            else:
+                log.error("Bulk trash failed: %s", e)
+                failed.extend({"id": mid, "error": str(e)} for mid in chunk)
+    return {
+        "success": len(succeeded),
+        "failed": len(failed),
+        "succeeded_ids": succeeded,
+        "errors": failed,
+    }
+
+
+def bulk_modify(service, msg_ids: list[str], add_labels: list[str] = None, remove_labels: list[str] = None) -> dict:
+    """Modify labels in bulk using Gmail's batchModify (up to 1000 per call)."""
+    BATCH_LIMIT = 1000
+    succeeded = []
+    failed = []
+    body = {"ids": [], "addLabelIds": add_labels or [], "removeLabelIds": remove_labels or []}
+    for i in range(0, len(msg_ids), BATCH_LIMIT):
+        if i > 0:
+            time.sleep(2)
+        chunk = msg_ids[i : i + BATCH_LIMIT]
+        body["ids"] = chunk
+        try:
+            service.users().messages().batchModify(userId="me", body=body).execute()
+            succeeded.extend(chunk)
+        except HttpError as e:
+            if e.resp.status == 429:
+                log.warning("Rate limited on bulk modify, retrying chunk after 5s")
+                time.sleep(5)
+                try:
+                    service.users().messages().batchModify(userId="me", body=body).execute()
+                    succeeded.extend(chunk)
+                except Exception as retry_err:
+                    log.error("Bulk modify retry failed: %s", retry_err)
+                    failed.extend({"id": mid, "error": str(retry_err)} for mid in chunk)
+            else:
+                log.error("Bulk modify failed: %s", e)
+                failed.extend({"id": mid, "error": str(e)} for mid in chunk)
+    return {
+        "success": len(succeeded),
+        "failed": len(failed),
+        "succeeded_ids": succeeded,
+        "errors": failed,
+    }
+
+
+def bulk_action(service, msg_ids: list[str], action_fn) -> dict:
+    """Run action_fn(service, id) for each id with throttling and retry."""
+    succeeded = []
+    failed = []
+    for i, msg_id in enumerate(msg_ids):
+        if i > 0 and i % 10 == 0:
+            time.sleep(1)
         try:
             action_fn(service, msg_id)
             succeeded.append(msg_id)
+        except HttpError as e:
+            if e.resp.status == 429:
+                log.warning("Rate limited on %s, retrying after 3s", msg_id)
+                time.sleep(3)
+                try:
+                    action_fn(service, msg_id)
+                    succeeded.append(msg_id)
+                except Exception as retry_err:
+                    failed.append({"id": msg_id, "error": str(retry_err)})
+            else:
+                failed.append({"id": msg_id, "error": str(e)})
         except Exception as e:
             failed.append({"id": msg_id, "error": str(e)})
     return {
