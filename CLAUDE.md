@@ -5,7 +5,7 @@ A web app that connects to Gmail, categorizes your inbox with Claude AI, and let
 ## Stack
 
 - **Frontend:** SvelteKit + Svelte 5 (runes), shadcn-svelte, Tailwind CSS, TypeScript
-- **Backend:** FastAPI (Python), SQLite via raw `sqlite3`, Jinja2 (legacy fallback)
+- **Backend:** FastAPI (Python), SQLite via raw `sqlite3`
 - **AI:** Anthropic Claude (Haiku 4.5) for email classification
 - **Gmail:** Google OAuth2 + Gmail API (`google-api-python-client`)
 - **Dev tooling:** Vite (frontend), uvicorn (backend), concurrently (both)
@@ -67,7 +67,7 @@ frontend/src/
 - **Categories stored in DB**, not hardcoded — users can add/edit/remove, AI prompt is built dynamically
 - **Gmail label IDs resolved to names** at display time, system labels filtered out, "Unlabelled" group for emails with no user labels
 - **Nested grouping** — primary group (e.g., labels) with secondary sub-groups (e.g., senders within each label)
-- **SPA served by FastAPI** — `frontend/build/` is served as static files, falls back to Jinja2 templates if no build exists
+- **SPA served by FastAPI** — `frontend/build/` is served as static files with SPA fallback routing
 - **All mutations trigger full dashboard reload** — simple and correct, avoids stale state
 
 ## Database Tables

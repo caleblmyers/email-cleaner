@@ -1,21 +1,21 @@
 # Email Cleaner
 
-A Python web app that connects to Gmail, categorizes your inbox with Claude AI, and lets you bulk delete, archive, move, save, and mark emails.
+A web app that connects to Gmail, categorizes your inbox with Claude AI, and lets you bulk delete, archive, move, save, and mark emails. SvelteKit frontend, FastAPI backend, SQLite database.
 
 ## Architecture
 
 ```mermaid
 graph LR
-    Browser -->|OAuth2 / REST| FastAPI
+    Browser -->|SvelteKit SPA| FastAPI
     FastAPI -->|fetch/actions| GmailAPI[Gmail API]
     FastAPI -->|classify| Claude[Anthropic Claude]
     FastAPI -->|read/write| SQLite[(SQLite)]
-    FastAPI -->|templates| Jinja2
 ```
 
 ## Prerequisites
 
 - Python 3.10+
+- Node.js 18+
 - A Google account with Gmail
 - An [Anthropic API key](https://console.anthropic.com/)
 
@@ -52,36 +52,51 @@ SESSION_SECRET_KEY=any-long-random-string-here
 ### 3. Install dependencies
 
 ```bash
+# Backend
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
+
+# Frontend
+cd frontend
+npm install
 ```
 
 ### 4. Run
 
 ```bash
-python main.py
+npm run dev
 ```
 
-Open [http://localhost:8000](http://localhost:8000) in your browser.
+This starts both the FastAPI backend (:8000) and Vite dev server (:5173). Open [http://localhost:5173](http://localhost:5173) in your browser.
+
+For production:
+
+```bash
+npm run start   # builds frontend then starts FastAPI serving everything on :8000
+```
 
 ## Usage
 
 1. Click **Connect Gmail Account** and complete the Google OAuth flow.
-2. Click **Fetch Emails** — this loads emails from your inbox and runs Claude AI to categorize them.
-3. Emails are grouped into 7 categories: **Newsletters, Receipts, Work, Social, Notifications, Spam, Uncategorized**.
-4. Select emails using checkboxes (or use **Select All** per category) and apply bulk actions:
-   - **Delete** — moves to Gmail trash (recoverable)
+2. Click **Fetch** to load emails from your inbox.
+3. Click **Classify** to run Claude AI categorization.
+4. Emails are grouped by category. Use the **Group by** and **then** dropdowns to change grouping (e.g., labels then sender domain).
+5. Select emails using checkboxes and apply bulk actions:
+   - **Delete** — moves to Gmail trash (recoverable for 30 days)
    - **Archive** — removes from inbox, keeps in All Mail
    - **Move to...** — moves to a Gmail label of your choice
-   - **Save to File** — exports email content as `.txt` files to `./saved_emails/`
-   - **Mark Read / Unread**
-5. Click **Fetch Emails** again to load more, or **Re-classify** to re-run AI on all cached emails.
+   - **Save** — exports email content as `.txt` files
+   - **Read / Unread** — toggle read status
+6. Click **Categories** to manage AI classification categories and their descriptor items.
+7. Click **Labels** to create, rename, or delete Gmail labels.
 
 ### Keyboard shortcuts
 
 | Shortcut | Action |
 |----------|--------|
 | `Ctrl+A` | Select all visible emails |
-| `Escape` | Close modal or clear selection |
+| `Escape` | Close dialog or clear selection |
 
 ## Configuration
 
@@ -91,7 +106,7 @@ All settings are in `.env` (defaults shown):
 |----------|---------|-------------|
 | `ANTHROPIC_API_KEY` | — | Required. Your Anthropic API key. |
 | `SESSION_SECRET_KEY` | — | Required. Random string for session signing. |
-| `APP_PORT` | `8000` | Port the server listens on. |
+| `APP_PORT` | `8000` | Port the backend listens on. |
 | `EMAILS_PER_PAGE` | `50` | Emails fetched per "Fetch" call. |
 | `CLASSIFIER_BATCH_SIZE` | `20` | Emails sent to Claude per API call. |
 | `SAVE_DIR` | `./saved_emails` | Directory for saved email files. |
@@ -100,49 +115,58 @@ All settings are in `.env` (defaults shown):
 
 ## API Documentation
 
-FastAPI auto-generates interactive API docs. When the app is running, visit:
+FastAPI auto-generates interactive API docs. When the backend is running, visit:
 
 - **Swagger UI**: [http://localhost:8000/docs](http://localhost:8000/docs)
 - **ReDoc**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
 
 ## Development
 
-### Running tests
-
-```bash
-pip install -r requirements.txt
-python -m pytest tests/ -v
-```
-
-### Linting and formatting
-
-```bash
-ruff check .
-ruff format .
-```
-
-### File structure
+### Project structure
 
 ```
 email-cleaner/
-├── main.py              # App entry point
-├── config.py            # Settings and logging setup
-├── database.py          # SQLite cache
+├── main.py              # FastAPI entry point, serves SPA
+├── config.py            # Environment config and logging
+├── database.py          # SQLite schema, CRUD, grouping
 ├── gmail_client.py      # Gmail API + OAuth2
-├── ai_classifier.py     # Claude classification
-├── routers/             # FastAPI route handlers
+├── ai_classifier.py     # Claude AI classification
+├── routers/
 │   ├── auth.py          # OAuth login/logout
-│   ├── dashboard.py     # Dashboard page
-│   └── emails.py        # Fetch, classify, bulk actions
-├── templates/           # Jinja2 HTML templates
-├── static/              # CSS + JS
+│   ├── emails.py        # Fetch, classify, group, bulk actions
+│   ├── categories.py    # AI category CRUD
+│   └── labels.py        # Gmail label CRUD
+├── frontend/            # SvelteKit SPA
+│   ├── src/
+│   │   ├── routes/      # Pages (dashboard, login)
+│   │   └── lib/
+│   │       ├── api/     # Typed API client
+│   │       ├── stores/  # Svelte 5 reactive stores
+│   │       ├── components/    # App components
+│   │       └── components/ui/ # shadcn-svelte primitives
+│   ├── svelte.config.js
+│   └── package.json
 ├── tests/               # Pytest test suite
-├── deploy/              # Production deployment configs
-├── credentials.json     # Your GCP credentials (gitignored)
-├── .env                 # Your secrets (gitignored)
-├── Dockerfile
-├── docker-compose.yml
-└── requirements.txt
+├── credentials.json     # GCP credentials (gitignored)
+├── .env                 # Secrets (gitignored)
+├── package.json         # Root scripts (dev, build, start)
+└── requirements.txt     # Python dependencies
+```
+
+### Commands
+
+```bash
+npm run dev        # Start backend + frontend dev servers
+npm run build      # Build SvelteKit SPA
+npm run start      # Build + start production server
+
+# Tests
+pip install -r requirements.txt
+python -m pytest tests/ -v
+
+# Linting
+ruff check .
+ruff format .
 ```
 
 ## Deployment
@@ -167,17 +191,16 @@ Before deploying:
 1. Update your GCP OAuth redirect URI to `https://mail.yourdomain.com/auth/callback`
 2. Point your domain's DNS to the server
 3. Place `credentials.json` and `.env` on the server
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed architecture documentation.
+4. Run `npm run build` to build the frontend
 
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
 | "Not authenticated" error | Delete `token.json` and re-login |
-| OAuth redirect mismatch | Ensure `REDIRECT_URI` in GCP matches your `APP_PORT` |
+| OAuth redirect mismatch | Ensure redirect URI in GCP matches your `APP_PORT` |
 | `credentials.json` not found | Download OAuth client JSON from GCP Console |
 | Rate limit errors (429) | The app auto-retries; reduce `EMAILS_PER_PAGE` if persistent |
 | Classification returns all "Uncategorized" | Check `ANTHROPIC_API_KEY` is valid and has credits |
 | Token refresh fails | Delete `token.json`, re-authenticate |
-| Database locked errors | Ensure only one instance of the app is running |
+| Frontend not loading | Run `npm run build` in `frontend/`, or use `npm run dev` for development |

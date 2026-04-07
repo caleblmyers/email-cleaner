@@ -2,19 +2,19 @@
 
 ## System Overview
 
-Email Cleaner is a single-user web application built with FastAPI that connects to Gmail via OAuth2, classifies emails using Anthropic's Claude AI, and provides bulk management actions. The app uses server-side rendering with Jinja2 templates and vanilla JavaScript for interactivity.
+Email Cleaner is a single-user web application with a SvelteKit SPA frontend and a FastAPI JSON API backend. It connects to Gmail via OAuth2, classifies emails using Anthropic's Claude AI, and provides bulk management actions.
 
 ```mermaid
 graph TB
     subgraph client [Browser]
-        JS[app.js]
-        HTML[Jinja2 Templates]
+        SPA[SvelteKit SPA]
     end
 
     subgraph server [FastAPI Application]
         AuthRouter[auth router]
-        DashRouter[dashboard router]
         EmailRouter[emails router]
+        CatRouter[categories router]
+        LabelRouter[labels router]
         Classifier[ai_classifier]
         GmailClient[gmail_client]
         DB[database]
@@ -26,15 +26,18 @@ graph TB
         SQLite[(SQLite DB)]
     end
 
-    JS -->|POST /emails/*| EmailRouter
-    JS -->|GET /dashboard| DashRouter
-    HTML -->|GET /auth/*| AuthRouter
+    SPA -->|POST /emails/*| EmailRouter
+    SPA -->|GET /emails/dashboard| EmailRouter
+    SPA -->|CRUD /categories/*| CatRouter
+    SPA -->|CRUD /labels/*| LabelRouter
+    SPA -->|GET /auth/*| AuthRouter
 
     AuthRouter -->|OAuth2| GmailClient
-    DashRouter --> DB
     EmailRouter --> GmailClient
     EmailRouter --> Classifier
     EmailRouter --> DB
+    CatRouter --> DB
+    LabelRouter --> GmailClient
 
     GmailClient -->|REST| Gmail
     Classifier -->|REST| Claude
@@ -44,28 +47,34 @@ graph TB
 ## Module Responsibilities
 
 ### `main.py`
-Application entry point. Creates the FastAPI app, registers middleware (session, rate limiting), mounts static files, includes routers, and initializes the database on startup.
+Application entry point. Creates the FastAPI app, registers middleware (session, rate limiting), includes API routers, and serves the SvelteKit SPA build as static files.
 
 ### `config.py`
-Loads environment variables from `.env` via python-dotenv. Exposes all application settings as module-level constants. Configures the structured logging system used across all modules.
+Loads environment variables from `.env` via python-dotenv. Exposes all application settings as module-level constants. Configures the structured logging system.
 
 ### `database.py`
-Manages the SQLite database. Provides functions for schema initialization, email upsert/query/delete, classification updates, label management, read status tracking, sync cursor persistence, and aggregate statistics.
+Manages the SQLite database. Schema initialization, default category seeding, email CRUD, classification updates, category CRUD, grouping functions (7 dimensions), and aggregate statistics.
 
 ### `gmail_client.py`
-Handles all Gmail API interactions. Manages OAuth2 flow (authorization URL generation, token exchange, credential refresh). Provides functions for listing messages, fetching metadata (via Batch API with sequential fallback), full message retrieval, and all modification actions (trash, archive, move, mark read/unread).
+Handles all Gmail API interactions. OAuth2 flow (authorization, token exchange, refresh), message listing and batch fetching, bulk modifications (trash, archive, move, mark), and label CRUD (create, rename, delete).
 
 ### `ai_classifier.py`
-Interfaces with the Anthropic Claude API. Splits emails into configurable batch sizes, constructs classification prompts, parses JSON responses, validates categories, clamps confidence scores, and falls back to "Uncategorized" on any error.
+Interfaces with the Anthropic Claude API. Builds the classification prompt dynamically from database categories, processes emails in configurable batches, validates responses, and falls back to "Uncategorized" on errors.
 
 ### `routers/auth.py`
-Handles the OAuth2 login flow: redirecting to Google, processing the callback, saving tokens, and logging out.
-
-### `routers/dashboard.py`
-Serves the main dashboard page. Loads all emails grouped by category, computes display formatting (dates, sizes, confidence percentages), and renders the Jinja2 template.
+OAuth2 login flow: redirect to Google, process callback, save tokens, logout.
 
 ### `routers/emails.py`
-API endpoints for all email operations: fetching from Gmail, running AI classification, listing/filtering emails, and executing bulk actions (delete, archive, move, mark, save). Includes rate limiting and input validation.
+Core API: fetching from Gmail, AI classification, dashboard data aggregation, email grouping (with nested sub-groups), and bulk actions (delete, archive, move, mark, save).
+
+### `routers/categories.py`
+CRUD for AI classification categories. Each category has a name, color, and comma-separated descriptor items that guide the AI classifier.
+
+### `routers/labels.py`
+CRUD for Gmail labels (create, rename, delete). Operates directly on the Gmail API.
+
+### `frontend/`
+SvelteKit SPA using Svelte 5 runes, shadcn-svelte components, and Tailwind CSS. Typed API client, reactive stores for selection/toast/loading state, and component-based UI.
 
 ## Data Flow
 
@@ -78,15 +87,13 @@ sequenceDiagram
     participant G as Google OAuth
 
     B->>A: GET /auth/login
-    A->>A: Generate state token
     A->>B: Redirect to Google
     B->>G: User consents
     G->>B: Redirect with code
     B->>A: GET /auth/callback?code=...&state=...
-    A->>A: Validate state
     A->>G: Exchange code for tokens
     A->>A: Save token.json
-    A->>B: Redirect to /dashboard
+    A->>B: Redirect to /
 ```
 
 ### Email Fetch and Classify
@@ -111,10 +118,32 @@ sequenceDiagram
 
     B->>E: POST /emails/classify
     E->>D: get_unclassified_emails
-    E->>C: classify_emails(batches)
+    E->>C: classify_emails(batches of 20)
     C-->>E: [{id, category, confidence, reasoning}]
     E->>D: update_classification (per email)
-    E-->>B: {classified: N}
+    E-->>B: {classified: N, usage: {...}}
+```
+
+### Dashboard Load
+
+```mermaid
+sequenceDiagram
+    participant B as Browser (SPA)
+    participant E as Emails Router
+    participant G as Gmail API
+    participant D as SQLite
+
+    B->>E: GET /emails/dashboard?group_by=label&then_by=sender
+    E->>D: Fetch all emails
+    E->>G: Get labels (for name resolution)
+    E->>E: Apply grouping function
+    E->>D: Get stats, categories, AI usage
+    E-->>B: {stats, group_summaries, categories, ai_usage, ...}
+    B->>B: Render overview cards, chip bar, group sections
+
+    Note over B,E: Groups are lazy-loaded on expand
+    B->>E: GET /emails/group?group_by=label&group_name=Family
+    E-->>B: {emails: [...], count: N}
 ```
 
 ## Database Schema
@@ -139,6 +168,16 @@ sequenceDiagram
 | `reasoning` | TEXT | AI explanation for classification |
 | `classified_at` | INTEGER | Unix timestamp of classification |
 
+### `categories` table
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER PK | Auto-increment ID |
+| `name` | TEXT UNIQUE | Category name |
+| `description` | TEXT | Comma-separated descriptor items for AI prompt |
+| `color` | TEXT | CSS color value for UI display |
+| `sort_order` | INTEGER | Display ordering |
+
 ### `sync_state` table
 
 | Column | Type | Description |
@@ -146,23 +185,22 @@ sequenceDiagram
 | `key` | TEXT PK | State key (e.g., `next_page_token`) |
 | `value` | TEXT | State value |
 
+### `ai_usage` table
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER PK | Auto-increment ID |
+| `timestamp` | INTEGER | When the classification run occurred |
+| `emails_count` | INTEGER | Emails classified in this run |
+| `input_tokens` | INTEGER | Input tokens consumed |
+| `output_tokens` | INTEGER | Output tokens consumed |
+| `total_cost` | REAL | Estimated cost in USD |
+
 ## AI Classification
 
-### Prompt Structure
+### Dynamic Prompt
 
-The classifier sends batches of emails to Claude with a system prompt defining 7 categories and their criteria. Each email is represented as a JSON object with `id`, `from`, `subject`, and `snippet` (truncated to 300 characters). The model returns a JSON array with `id`, `category`, `confidence`, and `reasoning` for each email.
-
-### Categories
-
-| Category | Criteria |
-|----------|----------|
-| Newsletters | Marketing, digests, subscriptions, blog updates, promotions |
-| Receipts | Order confirmations, invoices, payments, shipping notices |
-| Work | Work communication, meetings, tasks, colleagues, clients |
-| Social | Personal messages, social network notifications |
-| Notifications | Automated alerts, account notifications, security alerts |
-| Spam | Unsolicited, suspicious, phishing attempts |
-| Uncategorized | Anything that doesn't fit the above |
+The classifier builds its system prompt from the categories stored in the database. Each category's name and descriptor items are included. This means adding a new category (e.g., "Finance: invoices, bank statements, tax documents") immediately affects future classifications without code changes.
 
 ### Error Handling
 
@@ -171,29 +209,42 @@ The classifier sends batches of emails to Claude with a system prompt defining 7
 - Invalid categories in response: mapped to "Uncategorized"
 - Confidence values: clamped to [0.0, 1.0]
 
+## Grouping System
+
+Emails can be grouped by 7 dimensions, with optional nested sub-grouping:
+
+| Dimension | Description |
+|-----------|-------------|
+| `category` | AI-assigned classification |
+| `sender` | Sender domain (top 50, rest in "Other") |
+| `date` | Date range buckets (Today, This Week, etc.) |
+| `read_status` | Read vs Unread |
+| `size` | Small / Medium / Large |
+| `label` | Gmail labels (user-created only, "Unlabelled" for rest) |
+| `frequency` | Top 50 senders by email count |
+
+When label grouping is active, system labels (INBOX, CATEGORY_*, IMPORTANT, etc.) are filtered out and only user-created labels are shown. Emails with no user labels appear under "Unlabelled".
+
 ## Security Model
 
 ### Authentication
 - Google OAuth2 with `gmail.modify` scope
-- Authorization code flow with PKCE-like state parameter for CSRF protection
+- Authorization code flow with state parameter for CSRF protection
 - Tokens stored in `token.json` on disk
 - Automatic token refresh on expiry
 
 ### Session Management
 - Starlette `SessionMiddleware` with signed cookies
 - Configurable session timeout (`SESSION_MAX_AGE`, default 1 hour)
-- Session stores `logged_in` flag and OAuth state
 
 ### Rate Limiting
-- `slowapi` rate limiter on `/emails/fetch` and `/emails/classify` (10 requests/minute)
-- Prevents accidental API quota exhaustion
+- `slowapi` on `/emails/fetch` and `/emails/classify` (10 requests/minute)
 
 ### Input Validation
 - Pydantic models validate all request bodies
 - Email IDs validated against local database before forwarding to Gmail API
-- Label names validated as non-empty strings
 
 ### Constraints
 - **Single-user only**: one `token.json` and one shared database
-- **No RBAC**: any authenticated user has full access to all operations
+- **No RBAC**: any authenticated user has full access
 - **Local trust model**: designed to run on a trusted machine or behind a reverse proxy
