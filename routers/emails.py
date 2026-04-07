@@ -8,8 +8,6 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -18,8 +16,6 @@ import ai_classifier
 import config
 import database
 import gmail_client
-
-templates = Jinja2Templates(directory="templates")
 
 log = config.get_logger(__name__)
 
@@ -31,119 +27,47 @@ router = APIRouter(prefix="/emails", tags=["emails"])
 # Request/response models
 # ---------------------------------------------------------------------------
 
+def _validate_non_empty_ids(v: list[str]) -> list[str]:
+    if not v:
+        raise ValueError("email_ids must not be empty")
+    return v
+
+
 class FetchRequest(BaseModel):
-    """Parameters for fetching emails from Gmail."""
-    max_results: int = Field(default=config.EMAILS_PER_PAGE, ge=1, le=500, description="Max emails to fetch per page")
-    page_token: Optional[str] = Field(default=None, description="Gmail pagination token")
-    fetch_all: bool = Field(default=False, description="Fetch all emails by paginating through the entire inbox")
-
-
-class FetchResponse(BaseModel):
-    """Result of a fetch operation."""
-    fetched: int = Field(description="Number of emails fetched")
-    next_page_token: Optional[str] = Field(description="Token for fetching the next page")
-    skipped: Optional[list[dict]] = Field(default=None, description="Messages that failed to fetch")
+    max_results: int = Field(default=config.EMAILS_PER_PAGE, ge=1, le=500)
+    page_token: Optional[str] = None
+    fetch_all: bool = False
 
 
 class ClassifyRequest(BaseModel):
-    """Parameters for classifying emails. Omit email_ids to classify all unclassified."""
-    email_ids: Optional[list[str]] = Field(default=None, description="Specific email IDs to classify (omit for all unclassified)")
-    limit: Optional[int] = Field(default=None, ge=1, le=500, description="Max unclassified emails to classify (ignored if email_ids is set)")
-
-
-class UsageInfo(BaseModel):
-    """Token usage and cost from AI classification."""
-    input_tokens: int = Field(description="Input tokens consumed")
-    output_tokens: int = Field(description="Output tokens consumed")
-    total_cost: float = Field(description="Estimated cost in USD")
-
-
-class ClassifyResponse(BaseModel):
-    """Result of a classification operation."""
-    classified: int = Field(description="Number of emails classified")
-    usage: UsageInfo = Field(description="AI token usage and cost")
+    email_ids: Optional[list[str]] = None
+    limit: Optional[int] = Field(default=None, ge=1, le=500)
 
 
 class ActionRequest(BaseModel):
-    """Request body for delete and archive actions."""
-    email_ids: list[str] = Field(min_length=1, description="Email IDs to act on")
-
-    @field_validator("email_ids")
-    @classmethod
-    def non_empty(cls, v: list[str]) -> list[str]:
-        if not v:
-            raise ValueError("email_ids must not be empty")
-        return v
+    email_ids: list[str] = Field(min_length=1)
+    _val = field_validator("email_ids")(_validate_non_empty_ids)
 
 
 class MoveRequest(BaseModel):
-    """Request body for moving emails to a label."""
-    email_ids: list[str] = Field(min_length=1, description="Email IDs to move")
-    label_id: str = Field(description="Target Gmail label ID")
-
-    @field_validator("email_ids")
-    @classmethod
-    def non_empty(cls, v: list[str]) -> list[str]:
-        if not v:
-            raise ValueError("email_ids must not be empty")
-        return v
-
-    @field_validator("label_id")
-    @classmethod
-    def label_not_empty(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("label_id must not be empty")
-        return v
+    email_ids: list[str] = Field(min_length=1)
+    label_id: str = Field(min_length=1)
+    _val = field_validator("email_ids")(_validate_non_empty_ids)
 
 
 class MarkRequest(BaseModel):
-    """Request body for marking emails as read or unread."""
-    email_ids: list[str] = Field(min_length=1, description="Email IDs to mark")
-    read: bool = Field(description="True to mark read, False to mark unread")
-
-    @field_validator("email_ids")
-    @classmethod
-    def non_empty(cls, v: list[str]) -> list[str]:
-        if not v:
-            raise ValueError("email_ids must not be empty")
-        return v
+    email_ids: list[str] = Field(min_length=1)
+    read: bool
+    _val = field_validator("email_ids")(_validate_non_empty_ids)
 
 
 class SaveRequest(BaseModel):
-    """Request body for saving emails to files."""
-    email_ids: list[str] = Field(min_length=1, description="Email IDs to save")
-
-    @field_validator("email_ids")
-    @classmethod
-    def non_empty(cls, v: list[str]) -> list[str]:
-        if not v:
-            raise ValueError("email_ids must not be empty")
-        return v
-
-
-class BulkActionResponse(BaseModel):
-    """Result of a bulk action (delete, archive, move, mark)."""
-    success: int = Field(description="Number of emails successfully processed")
-    failed: int = Field(description="Number of emails that failed")
-    succeeded_ids: list[str] = Field(description="IDs of successfully processed emails")
-    errors: list[dict] = Field(description="Details of failed operations")
-
-
-class SaveResponse(BulkActionResponse):
-    """Result of a save-to-file action."""
-    saved_to: str = Field(description="Directory where files were saved")
-
-
-class EmailListResponse(BaseModel):
-    """Paginated list of emails."""
-    emails: list[dict] = Field(description="Email objects")
-    page: int = Field(description="Current page number")
-    per_page: int = Field(description="Emails per page")
+    email_ids: list[str] = Field(min_length=1)
+    _val = field_validator("email_ids")(_validate_non_empty_ids)
 
 
 # ---------------------------------------------------------------------------
-# Auth guard
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _require_auth():
@@ -152,7 +76,6 @@ def _require_auth():
 
 
 def _validate_email_ids(conn, email_ids: list[str]) -> list[str]:
-    """Return only email IDs that exist in the local database."""
     existing = database.get_emails_by_ids(conn, email_ids)
     existing_ids = {e["id"] for e in existing}
     invalid = [eid for eid in email_ids if eid not in existing_ids]
@@ -161,14 +84,56 @@ def _validate_email_ids(conn, email_ids: list[str]) -> list[str]:
     return [eid for eid in email_ids if eid in existing_ids]
 
 
+def _get_gmail_label_info() -> tuple[dict[str, str], set[str]]:
+    """Fetch Gmail labels and return (label_map, user_label_ids)."""
+    _require_auth()
+    service = gmail_client.build_gmail_service()
+    all_labels = gmail_client.get_labels(service)
+    label_map = {lbl["id"]: lbl["name"] for lbl in all_labels}
+    user_label_ids = {lbl["id"] for lbl in all_labels if lbl.get("type") == "user"}
+    return label_map, user_label_ids
+
+
+def _apply_grouping(emails: list[dict], group_by: str, conn=None) -> dict[str, list[dict]]:
+    """Apply a grouping function, handling label/category special cases."""
+    grouping_fn = database.GROUPING_FUNCTIONS[group_by]
+    if group_by == "label":
+        label_map, user_label_ids = _get_gmail_label_info()
+        return grouping_fn(emails, label_map=label_map, user_label_ids=user_label_ids)
+    elif group_by == "category":
+        return grouping_fn(emails, conn=conn)
+    else:
+        return grouping_fn(emails)
+
+
+def _fmt_emails(emails: list[dict]) -> list[dict]:
+    """Add display-formatted fields to email dicts."""
+    for e in emails:
+        ts = e.get("date")
+        if ts:
+            d = datetime.fromtimestamp(ts)
+            now = datetime.now()
+            if d.date() == now.date():
+                e["_date_fmt"] = d.strftime("%I:%M %p")
+            elif d.year == now.year:
+                e["_date_fmt"] = d.strftime("%b %d")
+            else:
+                e["_date_fmt"] = d.strftime("%b %d, %Y")
+        else:
+            e["_date_fmt"] = ""
+        b = e.get("size_estimate") or 0
+        e["_size_fmt"] = f"{b} B" if b < 1024 else f"{b // 1024} KB" if b < 1024 * 1024 else f"{b / (1024 * 1024):.1f} MB"
+        e["_confidence_pct"] = int((e.get("confidence") or 0) * 100)
+    return emails
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
-@router.post("/fetch", response_model=FetchResponse, summary="Fetch emails from Gmail")
+@router.post("/fetch", summary="Fetch emails from Gmail")
 @limiter.limit("10/minute")
 async def fetch_emails(request: Request, body: FetchRequest):
-    """Fetch a page of emails from the Gmail inbox and store them in the local cache."""
     _require_auth()
     service = gmail_client.build_gmail_service()
     conn = database.get_connection()
@@ -179,14 +144,9 @@ async def fetch_emails(request: Request, body: FetchRequest):
 
         while True:
             log.info("Fetching emails (max_results=%d, page_token=%s)", body.max_results, bool(page_token))
-            result = gmail_client.list_messages(
-                service,
-                page_token=page_token,
-                max_results=body.max_results,
-            )
+            result = gmail_client.list_messages(service, page_token=page_token, max_results=body.max_results)
             stubs = result.get("messages", [])
             if not stubs:
-                log.info("No new messages found")
                 break
 
             messages, skipped = gmail_client.batch_get_messages(service, [s["id"] for s in stubs])
@@ -211,237 +171,32 @@ async def fetch_emails(request: Request, body: FetchRequest):
         conn.close()
 
 
-@router.post("/classify", response_model=ClassifyResponse, summary="Classify emails with AI")
+@router.post("/classify", summary="Classify emails with AI")
 @limiter.limit("10/minute")
 async def classify_emails(request: Request, body: ClassifyRequest):
-    """Run Claude AI classification on unclassified emails, or re-classify specific emails by ID."""
     _require_auth()
     conn = database.get_connection()
     try:
         if body.email_ids:
             emails = database.get_emails_by_ids(conn, body.email_ids)
         else:
-            fetch_limit = body.limit or 500
-            emails = database.get_unclassified_emails(conn, limit=fetch_limit)
+            emails = database.get_unclassified_emails(conn, limit=body.limit or 500)
 
         if not emails:
-            log.info("No emails to classify")
             return {"classified": 0, "usage": {"input_tokens": 0, "output_tokens": 0, "total_cost": 0}}
 
         log.info("Classifying %d emails", len(emails))
         output = ai_classifier.classify_emails(emails)
-        results = output["results"]
-        usage = output["usage"]
-        for r in results:
-            database.update_classification(
-                conn,
-                r["id"],
-                r["category"],
-                r["confidence"],
-                r["reasoning"],
-            )
-        database.insert_ai_usage(conn, len(results), usage["input_tokens"], usage["output_tokens"], usage["total_cost"])
-        log.info("Classification complete: %d emails, cost=$%.4f", len(results), usage["total_cost"])
-        return {"classified": len(results), "usage": usage}
+        for r in output["results"]:
+            database.update_classification(conn, r["id"], r["category"], r["confidence"], r["reasoning"])
+        database.insert_ai_usage(conn, len(output["results"]), output["usage"]["input_tokens"], output["usage"]["output_tokens"], output["usage"]["total_cost"])
+        return {"classified": len(output["results"]), "usage": output["usage"]}
     finally:
         conn.close()
 
 
-@router.get("/stats", summary="Get email statistics")
-async def get_stats():
-    """Return email counts and total sizes grouped by category."""
-    conn = database.get_connection()
-    try:
-        return database.get_stats(conn)
-    finally:
-        conn.close()
-
-
-def _get_gmail_label_info():
-    """Fetch Gmail labels and return (label_map, user_label_ids)."""
-    _require_auth()
-    service = gmail_client.build_gmail_service()
-    all_labels = gmail_client.get_labels(service)
-    label_map = {lbl["id"]: lbl["name"] for lbl in all_labels}
-    user_label_ids = {lbl["id"] for lbl in all_labels if lbl.get("type") == "user"}
-    return label_map, user_label_ids
-
-
-def _get_group_emails(group_by: str, group_name: str) -> list[dict]:
-    """Shared helper: fetch all emails, group them, return the named group."""
-    if group_by not in database.GROUPING_FUNCTIONS:
-        raise HTTPException(status_code=400, detail="Invalid group_by value")
-
-    conn = database.get_connection()
-    try:
-        emails = database._fetch_all_emails(conn)
-        grouping_fn = database.GROUPING_FUNCTIONS[group_by]
-        if group_by == "label":
-            label_map, user_label_ids = _get_gmail_label_info()
-            grouped = grouping_fn(emails, label_map=label_map, user_label_ids=user_label_ids)
-        elif group_by == "category":
-            grouped = grouping_fn(emails, conn=conn)
-        else:
-            grouped = grouping_fn(emails)
-
-        return grouped.get(group_name, [])
-    finally:
-        conn.close()
-
-
-def _apply_subgroup(emails: list[dict], then_by: str, conn=None, label_map=None, user_label_ids=None) -> dict[str, list[dict]]:
-    """Apply a secondary grouping to a list of emails."""
-    grouping_fn = database.GROUPING_FUNCTIONS.get(then_by)
-    if not grouping_fn:
-        return {}
-    if then_by == "label":
-        return grouping_fn(emails, label_map=label_map or {}, user_label_ids=user_label_ids)
-    elif then_by == "category":
-        return grouping_fn(emails, conn=conn) if conn else grouping_fn(emails, conn=database.get_connection())
-    else:
-        return grouping_fn(emails)
-
-
-@router.get("/group", summary="Get emails for a specific group")
-async def get_group_emails(group_by: str = "category", group_name: str = ""):
-    """Return emails belonging to a specific group, with display formatting applied."""
-    emails = _get_group_emails(group_by, group_name)
-
-    from routers.dashboard import _fmt_date, _fmt_size
-    for email in emails:
-        email["_date_fmt"] = _fmt_date(email.get("date"))
-        email["_size_fmt"] = _fmt_size(email.get("size_estimate"))
-        email["_confidence_pct"] = int((email.get("confidence") or 0) * 100)
-
-    return {"emails": emails, "count": len(emails)}
-
-
-@router.get("/group/html", response_class=HTMLResponse, summary="Get emails for a group as HTML")
-async def get_group_emails_html(
-    request: Request,
-    group_by: str = "category",
-    group_name: str = "",
-    sid: str = "",
-    then_by: Optional[str] = None,
-):
-    """Return HTML partial of email rows for a specific group (for HTMX).
-    If then_by is set, returns nested sub-groups instead of a flat table."""
-    emails = _get_group_emails(group_by, group_name)
-
-    if then_by and then_by in database.GROUPING_FUNCTIONS and then_by != group_by:
-        # Build label map if needed for sub-grouping
-        label_map = {}
-        user_label_ids = None
-        if then_by == "label":
-            try:
-                label_map, user_label_ids = _get_gmail_label_info()
-            except Exception:
-                pass
-
-        conn = database.get_connection()
-        try:
-            subgroups = _apply_subgroup(emails, then_by, conn=conn, label_map=label_map, user_label_ids=user_label_ids)
-        finally:
-            conn.close()
-
-        # Build sub-group summaries
-        sub_summaries = [
-            {"name": name, "count": len(sub_emails)}
-            for name, sub_emails in subgroups.items()
-            if sub_emails
-        ]
-
-        return templates.TemplateResponse(
-            "partials/subgroups.html",
-            {
-                "request": request,
-                "sub_summaries": sub_summaries,
-                "parent_sid": sid,
-                "group_by": group_by,
-                "group_name": group_name,
-                "then_by": then_by,
-            },
-        )
-
-    from routers.dashboard import _fmt_date, _fmt_size
-    for email in emails:
-        email["_date_fmt"] = _fmt_date(email.get("date"))
-        email["_size_fmt"] = _fmt_size(email.get("size_estimate"))
-        email["_confidence_pct"] = int((email.get("confidence") or 0) * 100)
-
-    return templates.TemplateResponse(
-        "partials/group_emails.html",
-        {"request": request, "emails": emails, "sid": sid},
-    )
-
-
-def _get_subgroup_emails(group_by: str, group_name: str, then_by: str, subgroup_name: str) -> list[dict]:
-    """Fetch emails for a specific sub-group."""
-    parent_emails = _get_group_emails(group_by, group_name)
-
-    label_map = {}
-    user_label_ids = None
-    if then_by == "label":
-        try:
-            label_map, user_label_ids = _get_gmail_label_info()
-        except Exception:
-            pass
-
-    conn = database.get_connection()
-    try:
-        subgroups = _apply_subgroup(parent_emails, then_by, conn=conn, label_map=label_map, user_label_ids=user_label_ids)
-    finally:
-        conn.close()
-
-    return subgroups.get(subgroup_name, [])
-
-
-@router.get("/subgroup", summary="Get emails for a sub-group (JSON)")
-async def get_subgroup_emails(
-    group_by: str = "category",
-    group_name: str = "",
-    then_by: str = "",
-    subgroup_name: str = "",
-):
-    """Return emails belonging to a specific sub-group as JSON."""
-    emails = _get_subgroup_emails(group_by, group_name, then_by, subgroup_name)
-
-    from routers.dashboard import _fmt_date, _fmt_size
-    for email in emails:
-        email["_date_fmt"] = _fmt_date(email.get("date"))
-        email["_size_fmt"] = _fmt_size(email.get("size_estimate"))
-        email["_confidence_pct"] = int((email.get("confidence") or 0) * 100)
-
-    return {"emails": emails, "count": len(emails)}
-
-
-@router.get("/subgroup/html", response_class=HTMLResponse, summary="Get emails for a sub-group (HTML)")
-async def get_subgroup_emails_html(
-    request: Request,
-    group_by: str = "category",
-    group_name: str = "",
-    then_by: str = "",
-    subgroup_name: str = "",
-    sid: str = "",
-):
-    """Return HTML partial of email rows for a specific sub-group."""
-    emails = _get_subgroup_emails(group_by, group_name, then_by, subgroup_name)
-
-    from routers.dashboard import _fmt_date, _fmt_size
-    for email in emails:
-        email["_date_fmt"] = _fmt_date(email.get("date"))
-        email["_size_fmt"] = _fmt_size(email.get("size_estimate"))
-        email["_confidence_pct"] = int((email.get("confidence") or 0) * 100)
-
-    return templates.TemplateResponse(
-        "partials/group_emails.html",
-        {"request": request, "emails": emails, "sid": sid},
-    )
-
-
-@router.get("/dashboard", summary="Get dashboard data as JSON")
+@router.get("/dashboard", summary="Get dashboard data")
 async def get_dashboard_data(group_by: str = "category", then_by: Optional[str] = None):
-    """Return all data needed to render the dashboard in a single call."""
     if group_by not in database.GROUPING_FUNCTIONS:
         group_by = "category"
     if then_by and (then_by not in database.GROUPING_FUNCTIONS or then_by == group_by):
@@ -449,54 +204,71 @@ async def get_dashboard_data(group_by: str = "category", then_by: Optional[str] 
 
     conn = database.get_connection()
     try:
-        all_gmail_labels = []
-        label_map = {}
-        user_label_ids = set()
-        try:
-            _require_auth()
-            service = gmail_client.build_gmail_service()
-            all_gmail_labels = gmail_client.get_labels(service)
-            label_map = {lbl["id"]: lbl["name"] for lbl in all_gmail_labels}
-            user_label_ids = {lbl["id"] for lbl in all_gmail_labels if lbl.get("type") == "user"}
-        except Exception:
-            pass
-
         emails = database._fetch_all_emails(conn)
-        grouping_fn = database.GROUPING_FUNCTIONS[group_by]
-        if group_by == "label":
-            grouped = grouping_fn(emails, label_map=label_map, user_label_ids=user_label_ids)
-        elif group_by == "category":
-            grouped = grouping_fn(emails, conn=conn)
-        else:
-            grouped = grouping_fn(emails)
-
+        grouped = _apply_grouping(emails, group_by, conn=conn)
         stats = database.get_stats_for_groups(grouped)
-        total = database.get_total_count(conn)
-        unclassified_count = conn.execute("SELECT COUNT(*) AS cnt FROM emails WHERE category IS NULL").fetchone()["cnt"]
-        ai_usage = database.get_ai_usage_summary(conn)
-        categories = database.get_categories(conn)
-
-        group_summaries = [
-            {"name": name, "count": len(group_emails)}
-            for name, group_emails in grouped.items()
-            if group_emails
-        ]
 
         return {
             "stats": stats,
-            "total": total,
-            "unclassified_count": unclassified_count,
-            "ai_usage": ai_usage,
-            "group_summaries": group_summaries,
-            "categories": categories,
+            "total": database.get_total_count(conn),
+            "unclassified_count": conn.execute("SELECT COUNT(*) AS cnt FROM emails WHERE category IS NULL").fetchone()["cnt"],
+            "ai_usage": database.get_ai_usage_summary(conn),
+            "group_summaries": [{"name": n, "count": len(e)} for n, e in grouped.items() if e],
+            "categories": database.get_categories(conn),
         }
+    finally:
+        conn.close()
+
+
+@router.get("/group", summary="Get emails for a specific group")
+async def get_group_emails(group_by: str = "category", group_name: str = ""):
+    if group_by not in database.GROUPING_FUNCTIONS:
+        raise HTTPException(status_code=400, detail="Invalid group_by value")
+    conn = database.get_connection()
+    try:
+        emails = database._fetch_all_emails(conn)
+        grouped = _apply_grouping(emails, group_by, conn=conn)
+        result = grouped.get(group_name, [])
+    finally:
+        conn.close()
+    return {"emails": _fmt_emails(result), "count": len(result)}
+
+
+@router.get("/subgroup", summary="Get emails for a sub-group")
+async def get_subgroup_emails(
+    group_by: str = "category",
+    group_name: str = "",
+    then_by: str = "",
+    subgroup_name: str = "",
+):
+    if group_by not in database.GROUPING_FUNCTIONS or then_by not in database.GROUPING_FUNCTIONS:
+        raise HTTPException(status_code=400, detail="Invalid group_by or then_by value")
+
+    conn = database.get_connection()
+    try:
+        # Get parent group
+        all_emails = database._fetch_all_emails(conn)
+        parent_grouped = _apply_grouping(all_emails, group_by, conn=conn)
+        parent_emails = parent_grouped.get(group_name, [])
+        # Sub-group
+        sub_grouped = _apply_grouping(parent_emails, then_by, conn=conn)
+        result = sub_grouped.get(subgroup_name, [])
+    finally:
+        conn.close()
+    return {"emails": _fmt_emails(result), "count": len(result)}
+
+
+@router.get("/stats", summary="Get email statistics")
+async def get_stats():
+    conn = database.get_connection()
+    try:
+        return database.get_stats(conn)
     finally:
         conn.close()
 
 
 @router.get("/ai-usage", summary="Get AI usage summary")
 async def get_ai_usage():
-    """Return cumulative AI token usage and cost."""
     conn = database.get_connection()
     try:
         return database.get_ai_usage_summary(conn)
@@ -506,16 +278,14 @@ async def get_ai_usage():
 
 @router.get("/labels", summary="List user-created Gmail labels")
 async def get_labels():
-    """Return all user-created Gmail labels (for the move-to dropdown)."""
     _require_auth()
     service = gmail_client.build_gmail_service()
     labels = gmail_client.get_labels(service)
     return [lbl for lbl in labels if lbl.get("type") == "user"]
 
 
-@router.get("/", response_model=EmailListResponse, summary="List cached emails")
+@router.get("/", summary="List cached emails")
 async def list_emails(category: Optional[str] = None, page: int = 1, per_page: int = 50):
-    """Return paginated emails from the local cache, optionally filtered by category."""
     conn = database.get_connection()
     try:
         emails = database.get_emails_by_category(conn, category, page, per_page)
@@ -524,9 +294,94 @@ async def list_emails(category: Optional[str] = None, page: int = 1, per_page: i
         conn.close()
 
 
-@router.post("/actions/delete", response_model=BulkActionResponse, summary="Delete emails")
+# ---------------------------------------------------------------------------
+# Bulk actions
+# ---------------------------------------------------------------------------
+
+@router.post("/actions/delete", summary="Delete emails")
 async def delete_emails(body: ActionRequest):
-    """Move selected emails to Gmail trash and remove from local cache."""
+    _require_auth()
+    service = gmail_client.build_gmail_service()
+    conn = database.get_connection()
+    try:
+        validated_ids = _validate_email_ids(conn, body.email_ids)
+        if not validated_ids:
+            raise HTTPException(status_code=400, detail="No valid email IDs provided")
+        log.info("Deleting %d emails", len(validated_ids))
+        result = gmail_client.bulk_trash(service, validated_ids)
+        if result["succeeded_ids"]:
+            database.delete_emails(conn, result["succeeded_ids"])
+        return result
+    finally:
+        conn.close()
+
+
+@router.post("/actions/archive", summary="Archive emails")
+async def archive_emails(body: ActionRequest):
+    _require_auth()
+    service = gmail_client.build_gmail_service()
+    conn = database.get_connection()
+    try:
+        validated_ids = _validate_email_ids(conn, body.email_ids)
+        if not validated_ids:
+            raise HTTPException(status_code=400, detail="No valid email IDs provided")
+        log.info("Archiving %d emails", len(validated_ids))
+        result = gmail_client.bulk_modify(service, validated_ids, remove_labels=["INBOX"])
+        for mid in result["succeeded_ids"]:
+            row = conn.execute("SELECT label_ids FROM emails WHERE id=?", (mid,)).fetchone()
+            if row:
+                ids = [lid for lid in json.loads(row["label_ids"] or "[]") if lid != "INBOX"]
+                database.update_labels(conn, mid, ids)
+        return result
+    finally:
+        conn.close()
+
+
+@router.post("/actions/move", summary="Move emails to label")
+async def move_emails(body: MoveRequest):
+    _require_auth()
+    service = gmail_client.build_gmail_service()
+    conn = database.get_connection()
+    try:
+        validated_ids = _validate_email_ids(conn, body.email_ids)
+        if not validated_ids:
+            raise HTTPException(status_code=400, detail="No valid email IDs provided")
+        log.info("Moving %d emails to label %s", len(validated_ids), body.label_id)
+        result = gmail_client.bulk_modify(service, validated_ids, add_labels=[body.label_id], remove_labels=["INBOX"])
+        for mid in result["succeeded_ids"]:
+            row = conn.execute("SELECT label_ids FROM emails WHERE id=?", (mid,)).fetchone()
+            if row:
+                ids = [lid for lid in json.loads(row["label_ids"] or "[]") if lid != "INBOX"]
+                if body.label_id not in ids:
+                    ids.append(body.label_id)
+                database.update_labels(conn, mid, ids)
+        return result
+    finally:
+        conn.close()
+
+
+@router.post("/actions/mark", summary="Mark emails read/unread")
+async def mark_emails(body: MarkRequest):
+    _require_auth()
+    service = gmail_client.build_gmail_service()
+    conn = database.get_connection()
+    try:
+        validated_ids = _validate_email_ids(conn, body.email_ids)
+        if not validated_ids:
+            raise HTTPException(status_code=400, detail="No valid email IDs provided")
+        if body.read:
+            result = gmail_client.bulk_modify(service, validated_ids, remove_labels=["UNREAD"])
+        else:
+            result = gmail_client.bulk_modify(service, validated_ids, add_labels=["UNREAD"])
+        for mid in result["succeeded_ids"]:
+            database.update_read_status(conn, mid, body.read)
+        return result
+    finally:
+        conn.close()
+
+
+@router.post("/actions/save", summary="Save emails to files")
+async def save_emails(body: SaveRequest):
     _require_auth()
     service = gmail_client.build_gmail_service()
     conn = database.get_connection()
@@ -536,117 +391,9 @@ async def delete_emails(body: ActionRequest):
         conn.close()
     if not validated_ids:
         raise HTTPException(status_code=400, detail="No valid email IDs provided")
-    log.info("Deleting %d emails", len(validated_ids))
-    result = gmail_client.bulk_trash(service, validated_ids)
-    if result["succeeded_ids"]:
-        conn = database.get_connection()
-        try:
-            database.delete_emails(conn, result["succeeded_ids"])
-        finally:
-            conn.close()
-    return result
-
-
-@router.post("/actions/archive", response_model=BulkActionResponse, summary="Archive emails")
-async def archive_emails(body: ActionRequest):
-    """Remove selected emails from the inbox (keep in All Mail)."""
-    _require_auth()
-    service = gmail_client.build_gmail_service()
-    conn_check = database.get_connection()
-    try:
-        validated_ids = _validate_email_ids(conn_check, body.email_ids)
-    finally:
-        conn_check.close()
-    if not validated_ids:
-        raise HTTPException(status_code=400, detail="No valid email IDs provided")
-    log.info("Archiving %d emails", len(validated_ids))
-    result = gmail_client.bulk_modify(service, validated_ids, remove_labels=["INBOX"])
-    if result["succeeded_ids"]:
-        conn = database.get_connection()
-        try:
-            for mid in result["succeeded_ids"]:
-                row = conn.execute("SELECT label_ids FROM emails WHERE id=?", (mid,)).fetchone()
-                if row:
-                    ids = json.loads(row["label_ids"] or "[]")
-                    ids = [lid for lid in ids if lid != "INBOX"]
-                    database.update_labels(conn, mid, ids)
-        finally:
-            conn.close()
-    return result
-
-
-@router.post("/actions/move", response_model=BulkActionResponse, summary="Move emails to label")
-async def move_emails(body: MoveRequest):
-    """Move selected emails to a Gmail label and remove from inbox."""
-    _require_auth()
-    service = gmail_client.build_gmail_service()
-    conn_check = database.get_connection()
-    try:
-        validated_ids = _validate_email_ids(conn_check, body.email_ids)
-    finally:
-        conn_check.close()
-    if not validated_ids:
-        raise HTTPException(status_code=400, detail="No valid email IDs provided")
-    log.info("Moving %d emails to label %s", len(validated_ids), body.label_id)
-    result = gmail_client.bulk_modify(service, validated_ids, add_labels=[body.label_id], remove_labels=["INBOX"])
-    if result["succeeded_ids"]:
-        conn = database.get_connection()
-        try:
-            for mid in result["succeeded_ids"]:
-                row = conn.execute("SELECT label_ids FROM emails WHERE id=?", (mid,)).fetchone()
-                if row:
-                    ids = json.loads(row["label_ids"] or "[]")
-                    ids = [lid for lid in ids if lid != "INBOX"]
-                    if body.label_id not in ids:
-                        ids.append(body.label_id)
-                    database.update_labels(conn, mid, ids)
-        finally:
-            conn.close()
-    return result
-
-
-@router.post("/actions/mark", response_model=BulkActionResponse, summary="Mark emails read/unread")
-async def mark_emails(body: MarkRequest):
-    """Mark selected emails as read or unread in Gmail and local cache."""
-    _require_auth()
-    service = gmail_client.build_gmail_service()
-    conn_check = database.get_connection()
-    try:
-        validated_ids = _validate_email_ids(conn_check, body.email_ids)
-    finally:
-        conn_check.close()
-    if not validated_ids:
-        raise HTTPException(status_code=400, detail="No valid email IDs provided")
-    if body.read:
-        result = gmail_client.bulk_modify(service, validated_ids, remove_labels=["UNREAD"])
-    else:
-        result = gmail_client.bulk_modify(service, validated_ids, add_labels=["UNREAD"])
-    if result["succeeded_ids"]:
-        conn = database.get_connection()
-        try:
-            for mid in result["succeeded_ids"]:
-                database.update_read_status(conn, mid, body.read)
-        finally:
-            conn.close()
-    return result
-
-
-@router.post("/actions/save", response_model=SaveResponse, summary="Save emails to files")
-async def save_emails(body: SaveRequest):
-    """Download full email content and save as text files to the configured directory."""
-    _require_auth()
-    service = gmail_client.build_gmail_service()
-    conn_check = database.get_connection()
-    try:
-        validated_ids = _validate_email_ids(conn_check, body.email_ids)
-    finally:
-        conn_check.close()
-    if not validated_ids:
-        raise HTTPException(status_code=400, detail="No valid email IDs provided")
     os.makedirs(config.SAVE_DIR, exist_ok=True)
 
-    saved = []
-    failed = []
+    saved, failed = [], []
     for msg_id in validated_ids:
         try:
             msg = gmail_client.get_message_full(service, msg_id)
@@ -657,38 +404,24 @@ async def save_emails(body: SaveRequest):
         except Exception as e:
             failed.append({"id": msg_id, "error": str(e)})
 
-    return {
-        "success": len(saved),
-        "failed": len(failed),
-        "succeeded_ids": saved,
-        "errors": failed,
-        "saved_to": os.path.abspath(config.SAVE_DIR),
-    }
+    return {"success": len(saved), "failed": len(failed), "succeeded_ids": saved, "errors": failed, "saved_to": os.path.abspath(config.SAVE_DIR)}
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _make_filename(msg: dict) -> str:
     date_str = datetime.fromtimestamp(msg.get("date") or time.time()).strftime("%Y%m%d")
     sender = re.sub(r"[^\w.-]", "_", msg.get("sender_email", "unknown"))
-    subject = re.sub(r"[^\w\s-]", "", msg.get("subject", "no_subject"))
-    subject = re.sub(r"\s+", "_", subject.strip())[:50]
+    subject = re.sub(r"\s+", "_", re.sub(r"[^\w\s-]", "", msg.get("subject", "no_subject")).strip())[:50]
     return f"{date_str}_{sender}_{subject}.txt"
 
 
 def _write_email_file(path: str, msg: dict):
-    date_fmt = datetime.fromtimestamp(msg.get("date") or time.time()).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    date_fmt = datetime.fromtimestamp(msg.get("date") or time.time()).strftime("%Y-%m-%d %H:%M:%S")
     lines = [
         f"From: {msg.get('sender', '')} <{msg.get('sender_email', '')}>",
         f"Date: {date_fmt}",
         f"Subject: {msg.get('subject', '')}",
         f"Category: {msg.get('category', 'Uncategorized')}",
-        "-" * 60,
-        "",
+        "-" * 60, "",
         msg.get("body", msg.get("snippet", "")),
     ]
     with open(path, "w", encoding="utf-8") as f:

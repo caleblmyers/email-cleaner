@@ -33,24 +33,21 @@ app.include_router(categories.router)
 app.include_router(labels.router)
 app.include_router(emails.router)
 
-# Serve SvelteKit build if it exists, fall back to old static dir
+# Serve SvelteKit SPA
 SPA_DIR = os.path.join(os.path.dirname(__file__), "frontend", "build")
-if os.path.isdir(SPA_DIR):
+if os.path.isdir(os.path.join(SPA_DIR, "_app")):
     app.mount("/_app", StaticFiles(directory=os.path.join(SPA_DIR, "_app")), name="spa-assets")
 
-    @app.get("/{path:path}")
-    async def serve_spa(request: Request, path: str):
-        """Serve SvelteKit SPA — try static file first, fall back to index.html."""
-        file_path = os.path.join(SPA_DIR, path)
-        if path and os.path.isfile(file_path):
-            return FileResponse(file_path)
-        return FileResponse(os.path.join(SPA_DIR, "index.html"))
-else:
-    log.warning("SvelteKit build not found at %s — run 'npm run build' in frontend/", SPA_DIR)
-    app.mount("/static", StaticFiles(directory="static"), name="static")
-    # Keep old Jinja2 dashboard as fallback
-    from routers import dashboard
-    app.include_router(dashboard.router)
+@app.get("/{path:path}")
+async def serve_spa(request: Request, path: str):
+    """Serve SvelteKit SPA — try static file first, fall back to index.html."""
+    file_path = os.path.join(SPA_DIR, path)
+    if path and os.path.isfile(file_path):
+        return FileResponse(file_path)
+    index = os.path.join(SPA_DIR, "index.html")
+    if os.path.isfile(index):
+        return FileResponse(index)
+    return FileResponse(os.path.join(os.path.dirname(__file__), "frontend", "src", "app.html"), status_code=503)
 
 
 @app.on_event("startup")

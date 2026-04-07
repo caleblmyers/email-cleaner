@@ -24,7 +24,7 @@ export interface Email {
 	date: number;
 	size_estimate: number;
 	is_read: boolean;
-	label_ids: string;
+	label_ids: string; // JSON-encoded string[] from SQLite
 	category: string | null;
 	confidence: number | null;
 	reasoning: string | null;

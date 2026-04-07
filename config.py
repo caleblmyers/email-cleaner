@@ -24,16 +24,6 @@ DB_PATH = "email_cleaner.db"
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 REDIRECT_URI = f"http://localhost:{APP_PORT}/auth/callback"
 
-CATEGORIES = [
-    "Newsletters",
-    "Receipts",
-    "Work",
-    "Social",
-    "Notifications",
-    "Spam",
-    "Uncategorized",
-]
-
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
