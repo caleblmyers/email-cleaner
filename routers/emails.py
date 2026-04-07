@@ -8,6 +8,8 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -16,6 +18,8 @@ import ai_classifier
 import config
 import database
 import gmail_client
+
+templates = Jinja2Templates(directory="templates")
 
 log = config.get_logger(__name__)
 
@@ -253,27 +257,56 @@ async def get_stats():
         conn.close()
 
 
-@router.get("/group", summary="Get emails for a specific group")
-async def get_group_emails(group_by: str = "category", group_name: str = ""):
-    """Return emails belonging to a specific group, with display formatting applied."""
+def _get_gmail_label_info():
+    """Fetch Gmail labels and return (label_map, user_label_ids)."""
+    _require_auth()
+    service = gmail_client.build_gmail_service()
+    all_labels = gmail_client.get_labels(service)
+    label_map = {lbl["id"]: lbl["name"] for lbl in all_labels}
+    user_label_ids = {lbl["id"] for lbl in all_labels if lbl.get("type") == "user"}
+    return label_map, user_label_ids
+
+
+def _get_group_emails(group_by: str, group_name: str) -> list[dict]:
+    """Shared helper: fetch all emails, group them, return the named group."""
     if group_by not in database.GROUPING_FUNCTIONS:
         raise HTTPException(status_code=400, detail="Invalid group_by value")
+
     conn = database.get_connection()
     try:
+        emails = database._fetch_all_emails(conn)
+        grouping_fn = database.GROUPING_FUNCTIONS[group_by]
         if group_by == "label":
-            _require_auth()
-            service = gmail_client.build_gmail_service()
-            all_labels = gmail_client.get_labels(service)
-            label_map = {lbl["id"]: lbl["name"] for lbl in all_labels}
-            grouped = database.group_by_label(conn, label_map)
+            label_map, user_label_ids = _get_gmail_label_info()
+            grouped = grouping_fn(emails, label_map=label_map, user_label_ids=user_label_ids)
+        elif group_by == "category":
+            grouped = grouping_fn(emails, conn=conn)
         else:
-            grouping_fn = database.GROUPING_FUNCTIONS[group_by]
-            grouped = grouping_fn(conn)
-        emails = grouped.get(group_name, [])
+            grouped = grouping_fn(emails)
+
+        return grouped.get(group_name, [])
     finally:
         conn.close()
 
-    # Apply display formatting
+
+def _apply_subgroup(emails: list[dict], then_by: str, conn=None, label_map=None, user_label_ids=None) -> dict[str, list[dict]]:
+    """Apply a secondary grouping to a list of emails."""
+    grouping_fn = database.GROUPING_FUNCTIONS.get(then_by)
+    if not grouping_fn:
+        return {}
+    if then_by == "label":
+        return grouping_fn(emails, label_map=label_map or {}, user_label_ids=user_label_ids)
+    elif then_by == "category":
+        return grouping_fn(emails, conn=conn) if conn else grouping_fn(emails, conn=database.get_connection())
+    else:
+        return grouping_fn(emails)
+
+
+@router.get("/group", summary="Get emails for a specific group")
+async def get_group_emails(group_by: str = "category", group_name: str = ""):
+    """Return emails belonging to a specific group, with display formatting applied."""
+    emails = _get_group_emails(group_by, group_name)
+
     from routers.dashboard import _fmt_date, _fmt_size
     for email in emails:
         email["_date_fmt"] = _fmt_date(email.get("date"))
@@ -281,6 +314,184 @@ async def get_group_emails(group_by: str = "category", group_name: str = ""):
         email["_confidence_pct"] = int((email.get("confidence") or 0) * 100)
 
     return {"emails": emails, "count": len(emails)}
+
+
+@router.get("/group/html", response_class=HTMLResponse, summary="Get emails for a group as HTML")
+async def get_group_emails_html(
+    request: Request,
+    group_by: str = "category",
+    group_name: str = "",
+    sid: str = "",
+    then_by: Optional[str] = None,
+):
+    """Return HTML partial of email rows for a specific group (for HTMX).
+    If then_by is set, returns nested sub-groups instead of a flat table."""
+    emails = _get_group_emails(group_by, group_name)
+
+    if then_by and then_by in database.GROUPING_FUNCTIONS and then_by != group_by:
+        # Build label map if needed for sub-grouping
+        label_map = {}
+        user_label_ids = None
+        if then_by == "label":
+            try:
+                label_map, user_label_ids = _get_gmail_label_info()
+            except Exception:
+                pass
+
+        conn = database.get_connection()
+        try:
+            subgroups = _apply_subgroup(emails, then_by, conn=conn, label_map=label_map, user_label_ids=user_label_ids)
+        finally:
+            conn.close()
+
+        # Build sub-group summaries
+        sub_summaries = [
+            {"name": name, "count": len(sub_emails)}
+            for name, sub_emails in subgroups.items()
+            if sub_emails
+        ]
+
+        return templates.TemplateResponse(
+            "partials/subgroups.html",
+            {
+                "request": request,
+                "sub_summaries": sub_summaries,
+                "parent_sid": sid,
+                "group_by": group_by,
+                "group_name": group_name,
+                "then_by": then_by,
+            },
+        )
+
+    from routers.dashboard import _fmt_date, _fmt_size
+    for email in emails:
+        email["_date_fmt"] = _fmt_date(email.get("date"))
+        email["_size_fmt"] = _fmt_size(email.get("size_estimate"))
+        email["_confidence_pct"] = int((email.get("confidence") or 0) * 100)
+
+    return templates.TemplateResponse(
+        "partials/group_emails.html",
+        {"request": request, "emails": emails, "sid": sid},
+    )
+
+
+def _get_subgroup_emails(group_by: str, group_name: str, then_by: str, subgroup_name: str) -> list[dict]:
+    """Fetch emails for a specific sub-group."""
+    parent_emails = _get_group_emails(group_by, group_name)
+
+    label_map = {}
+    user_label_ids = None
+    if then_by == "label":
+        try:
+            label_map, user_label_ids = _get_gmail_label_info()
+        except Exception:
+            pass
+
+    conn = database.get_connection()
+    try:
+        subgroups = _apply_subgroup(parent_emails, then_by, conn=conn, label_map=label_map, user_label_ids=user_label_ids)
+    finally:
+        conn.close()
+
+    return subgroups.get(subgroup_name, [])
+
+
+@router.get("/subgroup", summary="Get emails for a sub-group (JSON)")
+async def get_subgroup_emails(
+    group_by: str = "category",
+    group_name: str = "",
+    then_by: str = "",
+    subgroup_name: str = "",
+):
+    """Return emails belonging to a specific sub-group as JSON."""
+    emails = _get_subgroup_emails(group_by, group_name, then_by, subgroup_name)
+
+    from routers.dashboard import _fmt_date, _fmt_size
+    for email in emails:
+        email["_date_fmt"] = _fmt_date(email.get("date"))
+        email["_size_fmt"] = _fmt_size(email.get("size_estimate"))
+        email["_confidence_pct"] = int((email.get("confidence") or 0) * 100)
+
+    return {"emails": emails, "count": len(emails)}
+
+
+@router.get("/subgroup/html", response_class=HTMLResponse, summary="Get emails for a sub-group (HTML)")
+async def get_subgroup_emails_html(
+    request: Request,
+    group_by: str = "category",
+    group_name: str = "",
+    then_by: str = "",
+    subgroup_name: str = "",
+    sid: str = "",
+):
+    """Return HTML partial of email rows for a specific sub-group."""
+    emails = _get_subgroup_emails(group_by, group_name, then_by, subgroup_name)
+
+    from routers.dashboard import _fmt_date, _fmt_size
+    for email in emails:
+        email["_date_fmt"] = _fmt_date(email.get("date"))
+        email["_size_fmt"] = _fmt_size(email.get("size_estimate"))
+        email["_confidence_pct"] = int((email.get("confidence") or 0) * 100)
+
+    return templates.TemplateResponse(
+        "partials/group_emails.html",
+        {"request": request, "emails": emails, "sid": sid},
+    )
+
+
+@router.get("/dashboard", summary="Get dashboard data as JSON")
+async def get_dashboard_data(group_by: str = "category", then_by: Optional[str] = None):
+    """Return all data needed to render the dashboard in a single call."""
+    if group_by not in database.GROUPING_FUNCTIONS:
+        group_by = "category"
+    if then_by and (then_by not in database.GROUPING_FUNCTIONS or then_by == group_by):
+        then_by = None
+
+    conn = database.get_connection()
+    try:
+        all_gmail_labels = []
+        label_map = {}
+        user_label_ids = set()
+        try:
+            _require_auth()
+            service = gmail_client.build_gmail_service()
+            all_gmail_labels = gmail_client.get_labels(service)
+            label_map = {lbl["id"]: lbl["name"] for lbl in all_gmail_labels}
+            user_label_ids = {lbl["id"] for lbl in all_gmail_labels if lbl.get("type") == "user"}
+        except Exception:
+            pass
+
+        emails = database._fetch_all_emails(conn)
+        grouping_fn = database.GROUPING_FUNCTIONS[group_by]
+        if group_by == "label":
+            grouped = grouping_fn(emails, label_map=label_map, user_label_ids=user_label_ids)
+        elif group_by == "category":
+            grouped = grouping_fn(emails, conn=conn)
+        else:
+            grouped = grouping_fn(emails)
+
+        stats = database.get_stats_for_groups(grouped)
+        total = database.get_total_count(conn)
+        unclassified_count = conn.execute("SELECT COUNT(*) AS cnt FROM emails WHERE category IS NULL").fetchone()["cnt"]
+        ai_usage = database.get_ai_usage_summary(conn)
+        categories = database.get_categories(conn)
+
+        group_summaries = [
+            {"name": name, "count": len(group_emails)}
+            for name, group_emails in grouped.items()
+            if group_emails
+        ]
+
+        return {
+            "stats": stats,
+            "total": total,
+            "unclassified_count": unclassified_count,
+            "ai_usage": ai_usage,
+            "group_summaries": group_summaries,
+            "categories": categories,
+        }
+    finally:
+        conn.close()
 
 
 @router.get("/ai-usage", summary="Get AI usage summary")

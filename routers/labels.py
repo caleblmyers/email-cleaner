@@ -18,11 +18,11 @@ def _require_auth():
 
 
 class LabelCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=200, description="Label name (use / for nesting, e.g. 'Work/Projects')")
+    name: str = Field(min_length=1, max_length=200)
 
 
 class LabelUpdate(BaseModel):
-    name: str = Field(min_length=1, max_length=200, description="New label name")
+    name: str = Field(min_length=1, max_length=200)
 
 
 @router.get("/", summary="List user-created Gmail labels")

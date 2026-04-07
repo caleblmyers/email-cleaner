@@ -1,5 +1,6 @@
 """Dashboard and login page routes (server-rendered HTML)."""
 
+from typing import Optional
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -62,16 +63,24 @@ GROUP_MODE_LABELS = {
 
 
 @router.get("/dashboard", response_class=HTMLResponse)
-async def dashboard(request: Request, group_by: str = "category"):
+async def dashboard(
+    request: Request,
+    group_by: str = "category",
+    then_by: Optional[str] = None,
+):
     if not gmail_client.is_authenticated():
         return RedirectResponse(url="/login")
 
     if group_by not in database.GROUPING_FUNCTIONS:
         group_by = "category"
+    if then_by and then_by not in database.GROUPING_FUNCTIONS:
+        then_by = None
+    if then_by == group_by:
+        then_by = None
 
     conn = database.get_connection()
     try:
-        # Fetch Gmail labels (needed for label grouping and move-to dropdown)
+        # Fetch Gmail labels
         all_gmail_labels = []
         try:
             service = gmail_client.build_gmail_service()
@@ -79,27 +88,33 @@ async def dashboard(request: Request, group_by: str = "category"):
         except Exception:
             pass
 
+        label_map = {lbl["id"]: lbl["name"] for lbl in all_gmail_labels}
+        user_labels = [lbl for lbl in all_gmail_labels if lbl.get("type") == "user"]
+
+        # Fetch all emails and group
+        emails = database._fetch_all_emails(conn)
+        grouping_fn = database.GROUPING_FUNCTIONS[group_by]
+        user_label_ids = {lbl["id"] for lbl in user_labels}
         if group_by == "label":
-            label_map = {lbl["id"]: lbl["name"] for lbl in all_gmail_labels}
-            grouped = database.group_by_label(conn, label_map)
+            grouped = grouping_fn(emails, label_map=label_map, user_label_ids=user_label_ids)
+        elif group_by == "category":
+            grouped = grouping_fn(emails, conn=conn)
         else:
-            grouping_fn = database.GROUPING_FUNCTIONS[group_by]
-            grouped = grouping_fn(conn)
+            grouped = grouping_fn(emails)
 
         stats = database.get_stats_for_groups(grouped)
         total = database.get_total_count(conn)
         unclassified_count = conn.execute("SELECT COUNT(*) AS cnt FROM emails WHERE category IS NULL").fetchone()["cnt"]
         ai_usage = database.get_ai_usage_summary(conn)
         user_categories = database.get_categories(conn)
-        labels = [lbl for lbl in all_gmail_labels if lbl.get("type") == "user"]
     finally:
         conn.close()
 
-    # Build group summaries (name + count only, no email data)
+    # Build group summaries
     group_summaries = [
-        {"name": name, "count": len(emails)}
-        for name, emails in grouped.items()
-        if emails
+        {"name": name, "count": len(group_emails)}
+        for name, group_emails in grouped.items()
+        if group_emails
     ]
 
     return templates.TemplateResponse(
@@ -110,9 +125,10 @@ async def dashboard(request: Request, group_by: str = "category"):
             "total": total,
             "unclassified_count": unclassified_count,
             "ai_usage": ai_usage,
-            "labels": labels,
+            "labels": user_labels,
             "group_summaries": group_summaries,
             "group_by": group_by,
+            "then_by": then_by or "",
             "group_modes": GROUP_MODE_LABELS,
             "user_categories": user_categories,
         },

@@ -210,20 +210,8 @@ def get_emails_by_category(
 
 
 def get_all_emails_grouped(conn: sqlite3.Connection) -> dict[str, list[dict]]:
-    rows = conn.execute(
-        "SELECT * FROM emails ORDER BY date DESC"
-    ).fetchall()
-    cat_names = get_category_names(conn)
-    grouped: dict[str, list[dict]] = {cat: [] for cat in cat_names}
-    if "Uncategorized" not in grouped:
-        grouped["Uncategorized"] = []
-    for r in rows:
-        d = dict(r)
-        cat = d.get("category") or "Uncategorized"
-        if cat not in grouped:
-            cat = "Uncategorized"
-        grouped[cat].append(d)
-    return grouped
+    emails = _fetch_all_emails(conn)
+    return group_by_category(emails, conn)
 
 
 def get_unclassified_emails(conn: sqlite3.Connection, limit: int = 200) -> list[dict]:
@@ -352,7 +340,7 @@ def get_emails_by_ids(conn: sqlite3.Connection, email_ids: list[str]) -> list[di
 
 
 # ---------------------------------------------------------------------------
-# Grouping functions — all return dict[str, list[dict]]
+# Grouping functions — all accept a pre-fetched email list
 # ---------------------------------------------------------------------------
 
 def _fetch_all_emails(conn: sqlite3.Connection) -> list[dict]:
@@ -360,14 +348,25 @@ def _fetch_all_emails(conn: sqlite3.Connection) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def group_by_sender_domain(conn: sqlite3.Connection) -> dict[str, list[dict]]:
-    emails = _fetch_all_emails(conn)
+def group_by_category(emails: list[dict], conn: sqlite3.Connection) -> dict[str, list[dict]]:
+    cat_names = get_category_names(conn)
+    grouped: dict[str, list[dict]] = {cat: [] for cat in cat_names}
+    if "Uncategorized" not in grouped:
+        grouped["Uncategorized"] = []
+    for e in emails:
+        cat = e.get("category") or "Uncategorized"
+        if cat not in grouped:
+            cat = "Uncategorized"
+        grouped[cat].append(e)
+    return grouped
+
+
+def group_by_sender_domain(emails: list[dict], **_) -> dict[str, list[dict]]:
     groups: dict[str, list[dict]] = {}
     for e in emails:
         addr = e.get("sender_email") or ""
         domain = addr.split("@")[-1].lower() if "@" in addr else "(unknown)"
         groups.setdefault(domain, []).append(e)
-    # Sort by count desc, cap at 20, rest in "Other"
     sorted_groups = sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)
     result = OrderedDict()
     other = []
@@ -381,8 +380,7 @@ def group_by_sender_domain(conn: sqlite3.Connection) -> dict[str, list[dict]]:
     return result
 
 
-def group_by_date_range(conn: sqlite3.Connection) -> dict[str, list[dict]]:
-    emails = _fetch_all_emails(conn)
+def group_by_date_range(emails: list[dict], **_) -> dict[str, list[dict]]:
     now = datetime.datetime.now()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     week_start = (now - datetime.timedelta(days=now.weekday())).replace(
@@ -417,8 +415,7 @@ def group_by_date_range(conn: sqlite3.Connection) -> dict[str, list[dict]]:
     return buckets
 
 
-def group_by_read_status(conn: sqlite3.Connection) -> dict[str, list[dict]]:
-    emails = _fetch_all_emails(conn)
+def group_by_read_status(emails: list[dict], **_) -> dict[str, list[dict]]:
     groups = OrderedDict([("Unread", []), ("Read", [])])
     for e in emails:
         if e.get("is_read"):
@@ -428,8 +425,7 @@ def group_by_read_status(conn: sqlite3.Connection) -> dict[str, list[dict]]:
     return groups
 
 
-def group_by_size(conn: sqlite3.Connection) -> dict[str, list[dict]]:
-    emails = _fetch_all_emails(conn)
+def group_by_size(emails: list[dict], **_) -> dict[str, list[dict]]:
     groups = OrderedDict([
         ("Small (< 10 KB)", []),
         ("Medium (10 KB - 100 KB)", []),
@@ -446,34 +442,37 @@ def group_by_size(conn: sqlite3.Connection) -> dict[str, list[dict]]:
     return groups
 
 
-def group_by_label(conn: sqlite3.Connection, label_map: dict[str, str] | None = None) -> dict[str, list[dict]]:
+def group_by_label(emails: list[dict], label_map: dict[str, str] | None = None, user_label_ids: set[str] | None = None, **_) -> dict[str, list[dict]]:
     """Group emails by Gmail label. If label_map is provided (id->name),
-    resolve IDs to display names and skip labels that no longer exist."""
-    emails = _fetch_all_emails(conn)
+    resolve IDs to display names and skip labels that no longer exist.
+    If user_label_ids is provided, only group by those labels and put
+    emails with no user labels into 'Unlabelled'."""
     groups: dict[str, list[dict]] = {}
     for e in emails:
         label_ids = json.loads(e.get("label_ids") or "[]")
-        if not label_ids:
-            groups.setdefault("(no labels)", []).append(e)
-        else:
-            for lid in label_ids:
-                if label_map is not None:
-                    name = label_map.get(lid)
-                    if name is None:
-                        continue  # label no longer exists, skip
-                else:
-                    name = lid
-                groups.setdefault(name, []).append(e)
-    return OrderedDict(sorted(groups.items(), key=lambda x: x[0]))
+        matched = False
+        for lid in label_ids:
+            # If we know which labels are user-created, skip system ones
+            if user_label_ids is not None and lid not in user_label_ids:
+                continue
+            if label_map is not None:
+                name = label_map.get(lid)
+                if name is None:
+                    continue
+            else:
+                name = lid
+            groups.setdefault(name, []).append(e)
+            matched = True
+        if not matched:
+            groups.setdefault("Unlabelled", []).append(e)
+    return OrderedDict(sorted(groups.items(), key=lambda x: (x[0] != "Unlabelled", x[0])))
 
 
-def group_by_frequency(conn: sqlite3.Connection) -> dict[str, list[dict]]:
-    emails = _fetch_all_emails(conn)
+def group_by_frequency(emails: list[dict], **_) -> dict[str, list[dict]]:
     groups: dict[str, list[dict]] = {}
     for e in emails:
         sender = e.get("sender_email") or "(unknown)"
         groups.setdefault(sender, []).append(e)
-    # Sort by count desc, cap at 20
     sorted_groups = sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)
     result = OrderedDict()
     other = []
@@ -499,7 +498,7 @@ def get_stats_for_groups(grouped: dict[str, list[dict]]) -> dict:
 
 
 GROUPING_FUNCTIONS = {
-    "category": get_all_emails_grouped,
+    "category": group_by_category,
     "sender": group_by_sender_domain,
     "date": group_by_date_range,
     "read_status": group_by_read_status,

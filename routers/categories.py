@@ -13,16 +13,19 @@ router = APIRouter(prefix="/categories", tags=["categories"])
 
 
 class CategoryCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=50, description="Category name")
-    description: str = Field(default="", max_length=500, description="Comma-separated descriptor items")
-    color: str = Field(default="#718096", max_length=20, description="CSS color value")
+    name: str = Field(min_length=1, max_length=50)
+    description: str = Field(default="")
+    color: str = Field(default="#718096")
 
 
 class CategoryUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=50)
-    description: Optional[str] = Field(default=None, max_length=500)
-    color: Optional[str] = Field(default=None, max_length=20)
-    sort_order: Optional[int] = Field(default=None, ge=0)
+    description: Optional[str] = Field(default=None)
+    color: Optional[str] = Field(default=None)
+
+
+class ItemAction(BaseModel):
+    item: str = Field(min_length=1)
 
 
 @router.get("/", summary="List all categories")
@@ -52,7 +55,6 @@ async def create_category(body: CategoryCreate):
 async def update_category(category_id: int, body: CategoryUpdate):
     conn = database.get_connection()
     try:
-        # Check for name conflict
         if body.name is not None:
             existing = conn.execute(
                 "SELECT id FROM categories WHERE name = ? AND id != ?",
@@ -66,18 +68,16 @@ async def update_category(category_id: int, body: CategoryUpdate):
             raise HTTPException(status_code=404, detail="Category not found")
 
         fields = body.model_dump(exclude_none=True)
-        cat = database.update_category(conn, category_id, **fields)
+        if fields:
+            database.update_category(conn, category_id, **{k: v.strip() if isinstance(v, str) else v for k, v in fields.items()})
 
-        # If name changed, update emails that reference the old name
         if body.name is not None and body.name.strip() != old["name"]:
-            conn.execute(
-                "UPDATE emails SET category = ? WHERE category = ?",
-                (body.name.strip(), old["name"]),
-            )
+            conn.execute("UPDATE emails SET category = ? WHERE category = ?", (body.name.strip(), old["name"]))
             conn.commit()
             log.info("Renamed category '%s' -> '%s'", old["name"], body.name)
 
-        return cat
+        row = conn.execute("SELECT * FROM categories WHERE id = ?", (category_id,)).fetchone()
+        return dict(row) if row else None
     finally:
         conn.close()
 
@@ -86,17 +86,50 @@ async def update_category(category_id: int, body: CategoryUpdate):
 async def delete_category(category_id: int):
     conn = database.get_connection()
     try:
-        # Prevent deleting Uncategorized
         row = conn.execute("SELECT name FROM categories WHERE id = ?", (category_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Category not found")
         if row["name"] == "Uncategorized":
             raise HTTPException(status_code=400, detail="Cannot delete the 'Uncategorized' category")
 
-        deleted = database.delete_category(conn, category_id)
-        if not deleted:
-            raise HTTPException(status_code=404, detail="Category not found")
-        log.info("Deleted category: %s (emails reassigned to Uncategorized)", row["name"])
+        database.delete_category(conn, category_id)
+        log.info("Deleted category: %s", row["name"])
         return {"deleted": True, "name": row["name"]}
+    finally:
+        conn.close()
+
+
+@router.put("/{category_id}/add-item", summary="Add a descriptor item")
+async def add_item(category_id: int, body: ItemAction):
+    conn = database.get_connection()
+    try:
+        row = conn.execute("SELECT * FROM categories WHERE id = ?", (category_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Category not found")
+        cat = dict(row)
+        items = [s.strip() for s in cat["description"].split(",") if s.strip()] if cat["description"] else []
+        new_item = body.item.strip()
+        if new_item and new_item not in items:
+            items.append(new_item)
+        database.update_category(conn, category_id, description=", ".join(items))
+        row = conn.execute("SELECT * FROM categories WHERE id = ?", (category_id,)).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+@router.put("/{category_id}/remove-item", summary="Remove a descriptor item")
+async def remove_item(category_id: int, body: ItemAction):
+    conn = database.get_connection()
+    try:
+        row = conn.execute("SELECT * FROM categories WHERE id = ?", (category_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Category not found")
+        cat = dict(row)
+        items = [s.strip() for s in cat["description"].split(",") if s.strip()] if cat["description"] else []
+        items = [i for i in items if i != body.item.strip()]
+        database.update_category(conn, category_id, description=", ".join(items))
+        row = conn.execute("SELECT * FROM categories WHERE id = ?", (category_id,)).fetchone()
+        return dict(row)
     finally:
         conn.close()
