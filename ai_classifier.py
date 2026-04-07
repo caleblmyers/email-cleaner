@@ -1,9 +1,19 @@
+"""Claude AI email classifier using the Anthropic API."""
+
 import json
+
 import anthropic
 
 import config
+import database
+
+log = config.get_logger(__name__)
 
 _client: anthropic.Anthropic | None = None
+
+# Haiku 4.5 pricing (per token)
+INPUT_COST_PER_TOKEN = 0.80 / 1_000_000
+OUTPUT_COST_PER_TOKEN = 4.00 / 1_000_000
 
 
 def _get_client() -> anthropic.Anthropic:
@@ -13,49 +23,93 @@ def _get_client() -> anthropic.Anthropic:
     return _client
 
 
-SYSTEM_PROMPT = """You are an expert email classifier. Classify each email into exactly one category.
+def _build_system_prompt(categories: list[dict]) -> str:
+    """Build the classification system prompt from the categories in the database."""
+    lines = ["You are an expert email classifier. Classify each email into exactly one category.", "", "Categories:"]
+    for cat in categories:
+        desc = cat["description"]
+        if desc:
+            lines.append(f"- {cat['name']}: {desc}")
+        else:
+            lines.append(f"- {cat['name']}")
+    cat_names = ", ".join(cat["name"] for cat in categories)
+    lines.extend([
+        "",
+        "Return a JSON array — one object per email — with this exact structure:",
+        "[",
+        "  {",
+        '    "id": "<email id from input>",',
+        f'    "category": "<one of: {cat_names}>",',
+        "    \"confidence\": <float 0.0 to 1.0>,",
+        '    "reasoning": "<one sentence explanation>"',
+        "  }",
+        "]",
+        "Return ONLY the JSON array, no other text, no markdown code fences.",
+    ])
+    return "\n".join(lines)
 
-Categories:
-- Newsletters: marketing emails, digests, subscriptions, blog updates, promotional content
-- Receipts: order confirmations, invoices, payment confirmations, shipping notices, purchase records
-- Work: work-related communication, meetings, tasks, colleagues, clients, job applications
-- Social: personal messages, social network notifications (Facebook, LinkedIn, Twitter, Instagram), dating apps
-- Notifications: automated alerts, account notifications, security alerts, system messages, app updates
-- Spam: unsolicited, suspicious, phishing attempts, or clearly unwanted email
-- Uncategorized: anything that does not fit the above categories
-
-Return a JSON array — one object per email — with this exact structure:
-[
-  {
-    "id": "<email id from input>",
-    "category": "<one of the 7 categories>",
-    "confidence": <float 0.0 to 1.0>,
-    "reasoning": "<one sentence explanation>"
-  }
-]
-Return ONLY the JSON array, no other text, no markdown code fences."""
 
 USER_PROMPT_TEMPLATE = """Classify these {count} emails:
 
 {emails_json}"""
 
-VALID_CATEGORIES = set(config.CATEGORIES)
+
+def _get_valid_categories() -> set[str]:
+    conn = database.get_connection()
+    try:
+        return set(database.get_category_names(conn))
+    finally:
+        conn.close()
 
 
-def classify_emails(emails: list[dict]) -> list[dict]:
-    """Classify a list of email metadata dicts using Claude. Returns classification results."""
+def _get_system_prompt() -> str:
+    conn = database.get_connection()
+    try:
+        cats = database.get_categories(conn)
+        return _build_system_prompt(cats)
+    finally:
+        conn.close()
+
+
+def classify_emails(emails: list[dict]) -> dict:
+    """Classify a list of email metadata dicts using Claude.
+
+    Returns dict with keys: results, usage (input_tokens, output_tokens, total_cost).
+    """
+    system_prompt = _get_system_prompt()
+    valid_categories = _get_valid_categories()
+
     results = []
+    total_input = 0
+    total_output = 0
     batch_size = config.CLASSIFIER_BATCH_SIZE
+    total_batches = (len(emails) + batch_size - 1) // batch_size
     for i in range(0, len(emails), batch_size):
+        batch_num = i // batch_size + 1
         batch = emails[i : i + batch_size]
-        batch_results = _classify_batch(batch)
+        log.info("Classifying batch %d/%d (%d emails)", batch_num, total_batches, len(batch))
+        batch_results, usage = _classify_batch(batch, system_prompt, valid_categories)
         results.extend(batch_results)
-    return results
+        total_input += usage["input_tokens"]
+        total_output += usage["output_tokens"]
+    total_cost = (total_input * INPUT_COST_PER_TOKEN) + (total_output * OUTPUT_COST_PER_TOKEN)
+    return {
+        "results": results,
+        "usage": {
+            "input_tokens": total_input,
+            "output_tokens": total_output,
+            "total_cost": round(total_cost, 6),
+        },
+    }
 
 
-def _classify_batch(emails: list[dict]) -> list[dict]:
-    """Send one batch of emails to Claude for classification."""
+def _classify_batch(emails: list[dict], system_prompt: str, valid_categories: set[str]) -> tuple[list[dict], dict]:
+    """Send one batch of emails to Claude for classification.
+
+    Returns (results, usage) where usage has input_tokens and output_tokens.
+    """
     client = _get_client()
+    zero_usage = {"input_tokens": 0, "output_tokens": 0}
 
     email_payload = [
         {
@@ -69,9 +123,9 @@ def _classify_batch(emails: list[dict]) -> list[dict]:
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-haiku-4-5-20251001",
             max_tokens=2048,
-            system=SYSTEM_PROMPT,
+            system=system_prompt,
             messages=[
                 {
                     "role": "user",
@@ -83,6 +137,11 @@ def _classify_batch(emails: list[dict]) -> list[dict]:
             ],
         )
 
+        usage = {
+            "input_tokens": response.usage.input_tokens,
+            "output_tokens": response.usage.output_tokens,
+        }
+
         raw = response.content[0].text.strip()
         # Strip markdown code fences if Claude adds them despite instructions
         if raw.startswith("```"):
@@ -91,11 +150,12 @@ def _classify_batch(emails: list[dict]) -> list[dict]:
 
         parsed = json.loads(raw)
 
-    except json.JSONDecodeError:
-        # Fallback: mark all as Uncategorized
-        return _fallback_results(emails)
-    except Exception:
-        return _fallback_results(emails)
+    except json.JSONDecodeError as e:
+        log.error("Failed to parse Claude response as JSON: %s", e)
+        return _fallback_results(emails), usage
+    except Exception as e:
+        log.error("Classification API call failed: %s", e)
+        return _fallback_results(emails), zero_usage
 
     # Validate and sanitize
     result_map = {item["id"]: item for item in parsed if isinstance(item, dict)}
@@ -103,7 +163,7 @@ def _classify_batch(emails: list[dict]) -> list[dict]:
     for e in emails:
         item = result_map.get(e["id"], {})
         category = item.get("category", "Uncategorized")
-        if category not in VALID_CATEGORIES:
+        if category not in valid_categories:
             category = "Uncategorized"
         confidence = float(item.get("confidence", 0.5))
         confidence = max(0.0, min(1.0, confidence))
@@ -115,7 +175,7 @@ def _classify_batch(emails: list[dict]) -> list[dict]:
                 "reasoning": item.get("reasoning", ""),
             }
         )
-    return results
+    return results, usage
 
 
 def _fallback_results(emails: list[dict]) -> list[dict]:
