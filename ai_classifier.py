@@ -71,27 +71,50 @@ def _get_system_prompt() -> str:
         conn.close()
 
 
-def classify_emails(emails: list[dict]) -> dict:
-    """Classify a list of email metadata dicts using Claude.
+def classify_emails_stream(emails: list[dict]):
+    """Yield batch progress dicts as each batch completes.
 
-    Returns dict with keys: results, usage (input_tokens, output_tokens, total_cost).
+    Each yield: {"batch": N, "total_batches": N, "classified": N, "results": [...], "usage": {...}}
     """
     system_prompt = _get_system_prompt()
     valid_categories = _get_valid_categories()
-
-    results = []
-    total_input = 0
-    total_output = 0
     batch_size = config.CLASSIFIER_BATCH_SIZE
     total_batches = (len(emails) + batch_size - 1) // batch_size
+    classified_so_far = 0
+
     for i in range(0, len(emails), batch_size):
         batch_num = i // batch_size + 1
         batch = emails[i : i + batch_size]
         log.info("Classifying batch %d/%d (%d emails)", batch_num, total_batches, len(batch))
         batch_results, usage = _classify_batch(batch, system_prompt, valid_categories)
-        results.extend(batch_results)
-        total_input += usage["input_tokens"]
-        total_output += usage["output_tokens"]
+        classified_so_far += len(batch_results)
+        cost = (usage["input_tokens"] * INPUT_COST_PER_TOKEN) + (usage["output_tokens"] * OUTPUT_COST_PER_TOKEN)
+        yield {
+            "batch": batch_num,
+            "total_batches": total_batches,
+            "classified": classified_so_far,
+            "total_emails": len(emails),
+            "results": batch_results,
+            "usage": {
+                "input_tokens": usage["input_tokens"],
+                "output_tokens": usage["output_tokens"],
+                "batch_cost": round(cost, 6),
+            },
+        }
+
+
+def classify_emails(emails: list[dict]) -> dict:
+    """Classify a list of email metadata dicts using Claude.
+
+    Returns dict with keys: results, usage (input_tokens, output_tokens, total_cost).
+    """
+    results = []
+    total_input = 0
+    total_output = 0
+    for progress in classify_emails_stream(emails):
+        results.extend(progress["results"])
+        total_input += progress["usage"]["input_tokens"]
+        total_output += progress["usage"]["output_tokens"]
     total_cost = (total_input * INPUT_COST_PER_TOKEN) + (total_output * OUTPUT_COST_PER_TOKEN)
     return {
         "results": results,

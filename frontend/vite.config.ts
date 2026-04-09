@@ -7,7 +7,17 @@ export default defineConfig({
 	server: {
 		proxy: {
 			'/auth': 'http://localhost:8000',
-			'/emails': 'http://localhost:8000',
+			'/emails': {
+				target: 'http://localhost:8000',
+				// Required for SSE — don't buffer the response
+				configure: (proxy) => {
+					proxy.on('proxyReq', (proxyReq, req) => {
+						if (req.url?.includes('/stream')) {
+							proxyReq.setHeader('Accept', 'text/event-stream');
+						}
+					});
+				}
+			},
 			'/categories': 'http://localhost:8000',
 			'/labels': 'http://localhost:8000'
 		}

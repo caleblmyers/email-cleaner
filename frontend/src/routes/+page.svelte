@@ -56,13 +56,14 @@
 	<header class="sticky top-0 z-40 bg-background border-b shadow-sm">
 		<div class="max-w-7xl mx-auto px-4 py-2 flex items-center justify-between">
 			<span class="font-bold text-lg tracking-tight">&#9993; Email Cleaner</span>
-			<a href="/auth/logout" class="text-sm text-muted-foreground hover:text-foreground transition-colors">Logout</a>
+			<a href="/auth/logout" data-sveltekit-reload class="text-sm text-muted-foreground hover:text-foreground transition-colors">Logout</a>
 		</div>
 		{#if data}
 			<Toolbar
 				{groupBy}
 				{thenBy}
 				groupModes={GROUP_MODES}
+				unclassifiedCount={data.unclassified_count}
 				onRefresh={loadDashboard}
 				onOpenCategories={() => categoriesDialog.open()}
 				onOpenLabels={() => labelsDialog.open()}

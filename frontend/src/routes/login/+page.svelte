@@ -17,7 +17,7 @@
 			{#if error}
 				<p class="text-sm text-destructive">Authentication error: {error}. Please try again.</p>
 			{/if}
-			<Button href="/auth/login" class="w-full" size="lg">Connect Gmail Account</Button>
+			<a href="/auth/login" data-sveltekit-reload class="inline-flex items-center justify-center w-full rounded-md bg-primary text-primary-foreground text-sm font-medium h-11 px-8 hover:bg-primary/90 transition-colors">Connect Gmail Account</a>
 		</Card.Content>
 		<Card.Footer class="flex-col text-sm text-muted-foreground">
 			<details class="w-full">

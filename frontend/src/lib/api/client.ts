@@ -52,7 +52,9 @@ export interface BulkResult {
 
 export interface GroupResult {
 	emails: Email[];
-	count: number;
+	total: number;
+	page: number;
+	per_page: number;
 }
 
 export interface Stats {
@@ -82,13 +84,18 @@ export function classifyEmails(limit?: number) {
 	});
 }
 
-export function getGroupEmails(groupBy: string, groupName: string) {
-	const params = new URLSearchParams({ group_by: groupBy, group_name: groupName });
+export function getGroupEmails(groupBy: string, groupName: string, page = 1, perPage = 50) {
+	const params = new URLSearchParams({ group_by: groupBy, group_name: groupName, page: String(page), per_page: String(perPage) });
 	return request<GroupResult>(`/emails/group?${params}`);
 }
 
-export function getSubgroupEmails(groupBy: string, groupName: string, thenBy: string, subgroupName: string) {
-	const params = new URLSearchParams({ group_by: groupBy, group_name: groupName, then_by: thenBy, subgroup_name: subgroupName });
+export function getSubgroupSummaries(groupBy: string, groupName: string, thenBy: string) {
+	const params = new URLSearchParams({ group_by: groupBy, group_name: groupName, then_by: thenBy });
+	return request<{ subgroups: GroupSummary[] }>(`/emails/group/subgroups?${params}`);
+}
+
+export function getSubgroupEmails(groupBy: string, groupName: string, thenBy: string, subgroupName: string, page = 1, perPage = 50) {
+	const params = new URLSearchParams({ group_by: groupBy, group_name: groupName, then_by: thenBy, subgroup_name: subgroupName, page: String(page), per_page: String(perPage) });
 	return request<GroupResult>(`/emails/subgroup?${params}`);
 }
 

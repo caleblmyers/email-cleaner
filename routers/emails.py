@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -41,7 +42,7 @@ class FetchRequest(BaseModel):
 
 class ClassifyRequest(BaseModel):
     email_ids: Optional[list[str]] = None
-    limit: Optional[int] = Field(default=None, ge=1, le=500)
+    limit: Optional[int] = Field(default=None, ge=1)
 
 
 class ActionRequest(BaseModel):
@@ -136,14 +137,16 @@ def _fmt_emails(emails: list[dict]) -> list[dict]:
 async def fetch_emails(request: Request, body: FetchRequest):
     _require_auth()
     service = gmail_client.build_gmail_service()
+    MAX_PAGES = 20  # Safety cap: at most 20 pages (~10,000 emails at 500/page)
     conn = database.get_connection()
     try:
         total_fetched = 0
         all_skipped = []
+        next_token = None
         page_token = body.page_token or database.get_sync_cursor(conn)
 
-        while True:
-            log.info("Fetching emails (max_results=%d, page_token=%s)", body.max_results, bool(page_token))
+        for page_num in range(MAX_PAGES):
+            log.info("Fetching emails page %d (max_results=%d)", page_num + 1, body.max_results)
             result = gmail_client.list_messages(service, page_token=page_token, max_results=body.max_results)
             stubs = result.get("messages", [])
             if not stubs:
@@ -160,7 +163,7 @@ async def fetch_emails(request: Request, body: FetchRequest):
             if not body.fetch_all or not next_token:
                 break
             page_token = next_token
-            time.sleep(2)
+            time.sleep(1)
 
         log.info("Fetched %d messages total (%d skipped)", total_fetched, len(all_skipped))
         resp = {"fetched": total_fetched, "next_page_token": next_token if not body.fetch_all else None}
@@ -180,7 +183,7 @@ async def classify_emails(request: Request, body: ClassifyRequest):
         if body.email_ids:
             emails = database.get_emails_by_ids(conn, body.email_ids)
         else:
-            emails = database.get_unclassified_emails(conn, limit=body.limit or 500)
+            emails = database.get_unclassified_emails(conn, limit=body.limit or 10000)
 
         if not emails:
             return {"classified": 0, "usage": {"input_tokens": 0, "output_tokens": 0, "total_cost": 0}}
@@ -193,6 +196,51 @@ async def classify_emails(request: Request, body: ClassifyRequest):
         return {"classified": len(output["results"]), "usage": output["usage"]}
     finally:
         conn.close()
+
+
+@router.post("/classify/stream", summary="Classify emails with SSE progress")
+async def classify_emails_stream(request: Request, body: ClassifyRequest):
+    """Stream classification progress as Server-Sent Events."""
+    _require_auth()
+    conn = database.get_connection()
+    try:
+        if body.email_ids:
+            emails = database.get_emails_by_ids(conn, body.email_ids)
+        else:
+            emails = database.get_unclassified_emails(conn, limit=body.limit or 10000)
+    finally:
+        conn.close()
+
+    if not emails:
+        async def empty():
+            yield f"data: {json.dumps({'done': True, 'classified': 0})}\n\n"
+        return StreamingResponse(empty(), media_type="text/event-stream")
+
+    def generate():
+        conn = database.get_connection()
+        total_classified = 0
+        total_cost = 0.0
+        try:
+            for progress in ai_classifier.classify_emails_stream(emails):
+                for r in progress["results"]:
+                    database.update_classification(conn, r["id"], r["category"], r["confidence"], r["reasoning"])
+                total_classified += len(progress["results"])
+                total_cost += progress["usage"]["batch_cost"]
+                event = {
+                    "batch": progress["batch"],
+                    "total_batches": progress["total_batches"],
+                    "classified": total_classified,
+                    "total_emails": progress["total_emails"],
+                    "batch_cost": progress["usage"]["batch_cost"],
+                    "total_cost": round(total_cost, 6),
+                }
+                yield f"data: {json.dumps(event)}\n\n"
+            database.insert_ai_usage(conn, total_classified, 0, 0, total_cost)
+            yield f"data: {json.dumps({'done': True, 'classified': total_classified, 'total_cost': round(total_cost, 6)})}\n\n"
+        finally:
+            conn.close()
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 @router.get("/dashboard", summary="Get dashboard data")
@@ -220,18 +268,44 @@ async def get_dashboard_data(group_by: str = "category", then_by: Optional[str] 
         conn.close()
 
 
+def _paginate(items: list, page: int, per_page: int) -> tuple[list, int]:
+    """Return a page slice and total count."""
+    total = len(items)
+    start = (page - 1) * per_page
+    return items[start:start + per_page], total
+
+
 @router.get("/group", summary="Get emails for a specific group")
-async def get_group_emails(group_by: str = "category", group_name: str = ""):
+async def get_group_emails(group_by: str = "category", group_name: str = "", page: int = 1, per_page: int = 50):
     if group_by not in database.GROUPING_FUNCTIONS:
         raise HTTPException(status_code=400, detail="Invalid group_by value")
     conn = database.get_connection()
     try:
         emails = database._fetch_all_emails(conn)
         grouped = _apply_grouping(emails, group_by, conn=conn)
-        result = grouped.get(group_name, [])
+        all_in_group = grouped.get(group_name, [])
     finally:
         conn.close()
-    return {"emails": _fmt_emails(result), "count": len(result)}
+    page_emails, total = _paginate(all_in_group, page, per_page)
+    return {"emails": _fmt_emails(page_emails), "total": total, "page": page, "per_page": per_page}
+
+
+@router.get("/group/subgroups", summary="Get sub-group summaries for a group")
+async def get_group_subgroups(group_by: str = "category", group_name: str = "", then_by: str = ""):
+    """Return sub-group names and counts within a parent group."""
+    if group_by not in database.GROUPING_FUNCTIONS or then_by not in database.GROUPING_FUNCTIONS:
+        raise HTTPException(status_code=400, detail="Invalid group_by or then_by value")
+    conn = database.get_connection()
+    try:
+        all_emails = database._fetch_all_emails(conn)
+        parent_grouped = _apply_grouping(all_emails, group_by, conn=conn)
+        parent_emails = parent_grouped.get(group_name, [])
+        sub_grouped = _apply_grouping(parent_emails, then_by, conn=conn)
+    finally:
+        conn.close()
+    return {
+        "subgroups": [{"name": n, "count": len(e)} for n, e in sub_grouped.items() if e]
+    }
 
 
 @router.get("/subgroup", summary="Get emails for a sub-group")
@@ -240,22 +314,23 @@ async def get_subgroup_emails(
     group_name: str = "",
     then_by: str = "",
     subgroup_name: str = "",
+    page: int = 1,
+    per_page: int = 50,
 ):
     if group_by not in database.GROUPING_FUNCTIONS or then_by not in database.GROUPING_FUNCTIONS:
         raise HTTPException(status_code=400, detail="Invalid group_by or then_by value")
 
     conn = database.get_connection()
     try:
-        # Get parent group
         all_emails = database._fetch_all_emails(conn)
         parent_grouped = _apply_grouping(all_emails, group_by, conn=conn)
         parent_emails = parent_grouped.get(group_name, [])
-        # Sub-group
         sub_grouped = _apply_grouping(parent_emails, then_by, conn=conn)
-        result = sub_grouped.get(subgroup_name, [])
+        all_in_subgroup = sub_grouped.get(subgroup_name, [])
     finally:
         conn.close()
-    return {"emails": _fmt_emails(result), "count": len(result)}
+    page_emails, total = _paginate(all_in_subgroup, page, per_page)
+    return {"emails": _fmt_emails(page_emails), "total": total, "page": page, "per_page": per_page}
 
 
 @router.get("/stats", summary="Get email statistics")

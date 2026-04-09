@@ -8,6 +8,7 @@
 		groupBy = 'category',
 		thenBy = '',
 		groupModes,
+		unclassifiedCount = 0,
 		onRefresh,
 		onOpenCategories,
 		onOpenLabels
@@ -15,6 +16,7 @@
 		groupBy: string;
 		thenBy: string;
 		groupModes: Record<string, string>;
+		unclassifiedCount?: number;
 		onRefresh: () => void;
 		onOpenCategories: () => void;
 		onOpenLabels: () => void;
@@ -37,12 +39,37 @@
 
 	async function doClassify() {
 		const limit = parseInt(classifyCount);
-		loading.show(`Classifying ${limit > 0 ? limit : 'all'} emails...`);
+		loading.show('Starting classification...');
 		try {
-			const r = await api.classifyEmails(limit > 0 ? limit : undefined);
-			loading.hide();
-			toast.show(`Classified ${r.classified} emails ($${r.usage.total_cost.toFixed(4)})`);
-			onRefresh();
+			const body = limit > 0 ? { limit } : {};
+			const resp = await fetch('/emails/classify/stream', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(body),
+			});
+			if (!resp.ok) throw new Error(await resp.text());
+			const reader = resp.body!.getReader();
+			const decoder = new TextDecoder();
+			let buffer = '';
+
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				buffer += decoder.decode(value, { stream: true });
+				const lines = buffer.split('\n');
+				buffer = lines.pop() || '';
+				for (const line of lines) {
+					if (!line.startsWith('data: ')) continue;
+					const event = JSON.parse(line.slice(6));
+					if (event.done) {
+						loading.hide();
+						toast.show(`Classified ${event.classified} emails ($${event.total_cost.toFixed(4)})`);
+						onRefresh();
+					} else {
+						loading.show(`Classifying batch ${event.batch}/${event.total_batches} (${event.classified}/${event.total_emails} emails, $${event.total_cost.toFixed(4)})`);
+					}
+				}
+			}
 		} catch (e: any) { loading.hide(); toast.error(e.message); }
 	}
 
@@ -76,10 +103,14 @@
 		<div class="flex items-center gap-1">
 			<Button size="sm" variant="secondary" onclick={doClassify}>Classify</Button>
 			<select bind:value={classifyCount} class="h-8 text-xs rounded-md border border-input bg-background px-2">
-				<option value="20">20</option>
-				<option value="50">50</option>
-				<option value="100">100</option>
-				<option value="0">All</option>
+				{#each [20, 50, 100, 200, 500] as n}
+					{#if n <= unclassifiedCount || n <= 50}
+						<option value={String(n)}>{n}</option>
+					{/if}
+				{/each}
+				{#if unclassifiedCount > 0}
+					<option value={String(unclassifiedCount)}>All ({unclassifiedCount})</option>
+				{/if}
 			</select>
 		</div>
 

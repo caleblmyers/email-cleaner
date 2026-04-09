@@ -1,8 +1,8 @@
 {
   "private": true,
   "scripts": {
-    "dev": "npx concurrently -n api,svelte -c blue,green \"python3 main.py\" \"cd frontend && npm run dev\"",
+    "dev": "npx concurrently -n api,svelte -c blue,green \"./venv/bin/python3 main.py\" \"cd frontend && npm run dev\"",
     "build": "cd frontend && npm run build",
-    "start": "npm run build && python3 main.py"
+    "start": "npm run build && ./venv/bin/python3 main.py"
   }
 }

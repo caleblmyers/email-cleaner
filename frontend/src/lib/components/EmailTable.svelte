@@ -2,10 +2,20 @@
 	import type { Email } from '$lib/api/client';
 	import { selection } from '$lib/stores/selection.svelte';
 	import * as Table from '$lib/components/ui/table';
-	import { Badge } from '$lib/components/ui/badge';
+	import { Button } from '$lib/components/ui/button';
 	import { Checkbox } from '$lib/components/ui/checkbox';
+	import { ChevronLeft, ChevronRight } from 'lucide-svelte';
 
-	let { emails }: { emails: Email[] } = $props();
+	let { emails, total = 0, page = 1, perPage = 50, onPageChange }: {
+		emails: Email[];
+		total?: number;
+		page?: number;
+		perPage?: number;
+		onPageChange?: (page: number) => void;
+	} = $props();
+
+	const totalPages = $derived(Math.ceil(total / perPage));
+	const showPagination = $derived(total > perPage);
 
 	function fmtDate(ts: number): string {
 		if (!ts) return '';
@@ -81,3 +91,19 @@
 		{/if}
 	</Table.Body>
 </Table.Root>
+
+{#if showPagination && onPageChange}
+	<div class="flex items-center justify-center gap-4 py-2 border-t">
+		<Button variant="outline" size="sm" disabled={page <= 1} onclick={() => onPageChange(page - 1)}>
+			<ChevronLeft class="h-4 w-4" />
+			Prev
+		</Button>
+		<span class="text-xs text-muted-foreground">
+			Page {page} of {totalPages} ({total} emails)
+		</span>
+		<Button variant="outline" size="sm" disabled={page >= totalPages} onclick={() => onPageChange(page + 1)}>
+			Next
+			<ChevronRight class="h-4 w-4" />
+		</Button>
+	</div>
+{/if}
